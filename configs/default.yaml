@@ -1,0 +1,27 @@
+# Base hyperparameters (fill as needed)
+
+seed: 42
+
+dataset:
+	root: data/
+	num_frames: 9
+	num_players: 12
+	input_size: [224, 224]
+
+training:
+	batch_size: 8
+	epochs: 50
+	lr: 1e-3
+	weight_decay: 1e-4
+	device: cuda
+
+model:
+	cnn_output_size: 4096
+	lstm_hidden_p: 512
+	lstm_hidden_g: 512
+	n_subgroups: 2
+	pool: max
+
+checkpoint:
+	dir: outputs/checkpoints
+	save_every: 5

@@ -1,0 +1,5 @@
+# Overrides for 4-subgroup style
+
+model:
+	n_subgroups: 4
+	description: "Front/Back split per team (4 subgroups)"

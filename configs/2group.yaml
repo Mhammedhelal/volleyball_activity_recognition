@@ -1,0 +1,5 @@
+# Overrides for 2-subgroup style
+
+model:
+	n_subgroups: 2
+	description: "Left / Right team split (2 subgroups)"
