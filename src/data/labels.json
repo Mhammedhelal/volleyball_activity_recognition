@@ -1,0 +1,24 @@
+{
+  "group_activities": {
+    "r_set": 0,
+    "r_spike": 1,
+    "r_pass": 2,
+    "r_winpoint": 3,
+    "l_winpoint": 4,
+    "l_pass": 5,
+    "l_spike": 6,
+    "l_set": 7
+  },
+
+  "person_actions": {
+    "waiting": 0,
+    "setting": 1,
+    "digging": 2,
+    "falling": 3,
+    "spiking": 4,
+    "blocking": 5,
+    "jumping": 6,
+    "moving": 7,
+    "standing": 8
+  }
+}

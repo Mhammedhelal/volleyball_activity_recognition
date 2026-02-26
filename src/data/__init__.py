@@ -8,7 +8,7 @@ Expose label lists and standard split names for easy imports:
 """
 
 from .labels import PERSON_ACTIONS, GROUP_ACTIVITIES, SUBGROUP_ACTIVITIES
-from .splits import train_indecies as TRAIN_VIDEOS, val_indecies as VAL_VIDEOS, test_indecies as TEST_VIDEOS
+from .splits import TRAIN_VIDEOS, VAL_VIDEOS, TEST_VIDEOS
 
 __all__ = [
 	"PERSON_ACTIONS",
