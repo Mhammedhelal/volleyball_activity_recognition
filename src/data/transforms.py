@@ -2,7 +2,6 @@ from pathlib import Path
 import sys
 from torchvision import transforms
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import Config
 
 cfg = Config.from_yaml('configs/default.yaml')

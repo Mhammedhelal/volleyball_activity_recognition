@@ -4,15 +4,15 @@ import sys
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.config import Config
 cfg = Config.from_yaml('/configs/default.yaml')
 LSTM_HIDDEN_G = cfg.group_lstm.hidden_dim
 
-GROUP_ACTIVITIES = [
-    "left_set", "left_spike", "left_pass", "left_winpoint",
-    "right_set", "right_spike", "right_pass", "right_winpoint",
-]  # 8 classes
+GROUP_ACTIVITIES = cfg.labels.group_activities
+#[
+#     "l_set", "l_spike", "l_pass", "l_winpoint",
+#     "r_set", "r_spike", "r_pass", "r_winpoint",
+# ]  # 8 classes
 
 
 class FrameDescriptor(nn.Module):

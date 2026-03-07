@@ -4,7 +4,6 @@ import sys
 import torch
 import torch.nn as nn
 from torchvision import models
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 PERSON_ACTIONS = [
     "waiting", "setting", "digging", "falling",
