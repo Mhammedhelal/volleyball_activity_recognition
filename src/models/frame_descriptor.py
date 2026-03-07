@@ -1,8 +1,13 @@
+from pathlib import Path
+import sys
+
 import torch
 import torch.nn as nn
 
-from ..config import LSTM_HIDDEN_G
-
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from src.config import Config
+cfg = Config.from_yaml('/configs/default.yaml')
+LSTM_HIDDEN_G = cfg.group_lstm.hidden_dim
 
 GROUP_ACTIVITIES = [
     "left_set", "left_spike", "left_pass", "left_winpoint",

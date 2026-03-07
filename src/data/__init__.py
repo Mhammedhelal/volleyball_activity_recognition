@@ -2,18 +2,17 @@
 
 Expose label lists and standard split names for easy imports:
 
-	from src.data import PERSON_ACTIONS, GROUP_ACTIVITIES, SUBGROUP_ACTIVITIES
+	from src.data import PERSON_ACTIONS, GROUP_ACTIVITIES
 	from src.data import TRAIN_VIDEOS, VAL_VIDEOS, TEST_VIDEOS
 
 """
 
-from .labels import PERSON_ACTIONS, GROUP_ACTIVITIES, SUBGROUP_ACTIVITIES
+from .labels import PERSON_ACTIONS, GROUP_ACTIVITIES
 from .splits import TRAIN_VIDEOS, VAL_VIDEOS, TEST_VIDEOS
 
 __all__ = [
 	"PERSON_ACTIONS",
 	"GROUP_ACTIVITIES",
-	"SUBGROUP_ACTIVITIES",
 	"TRAIN_VIDEOS",
 	"VAL_VIDEOS",
 	"TEST_VIDEOS",

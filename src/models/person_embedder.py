@@ -1,7 +1,10 @@
+from pathlib import Path
+import sys
+
 import torch
 import torch.nn as nn
 from torchvision import models
-from ..config import CNN_OUTPUT_SIZE, LSTM_HIDDEN_P
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 PERSON_ACTIONS = [
     "waiting", "setting", "digging", "falling",

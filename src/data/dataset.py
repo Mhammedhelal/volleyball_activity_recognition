@@ -2,7 +2,11 @@ from torch.utils.data import Dataset
 from pathlib import Path
 import torch
 from PIL import Image
-from labels import GROUP_ACTIVITIES, PERSON_ACTIONS
+
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.config import Config
 
 
 class VolleyballDataset(Dataset):
@@ -10,12 +14,14 @@ class VolleyballDataset(Dataset):
         self,
         root:         Path,
         split_videos: set[int],
+        cfg: Config,
         transforms=None,
         T: int = 9,
     ):
         assert T % 2 == 1, f"T must be odd for a symmetric window, got {T}"
 
         self.root       = Path(root)
+        self.cfg = cfg
         self.transforms = transforms
         self.T          = T
         self.half       = T // 2
@@ -116,9 +122,8 @@ class VolleyballDataset(Dataset):
 
             frame_id    = int(frame_str.replace(".jpg", ""))
 
-            # FIX 5: imported name was GROUP_ACTIONS which does not exist.
-            # Correct name from labels.py is GROUP_ACTIVITIES.
-            group_label = GROUP_ACTIVITIES.index(group_str)
+
+            group_label = self.cfg.labesls.group_activities.index(group_str)
 
             player_tokens = tokens[2:]
             assert len(player_tokens) % 5 == 0, (
@@ -134,7 +139,7 @@ class VolleyballDataset(Dataset):
                     "bbox":          (x, y, w, h),
                     "bbox_center_x": x + w / 2,
                     "action":        action,
-                    "action_id":     PERSON_ACTIONS.index(action),
+                    "action_id":     self.cfg.labels.person_actions.index(action),
                 })
 
             samples.append({

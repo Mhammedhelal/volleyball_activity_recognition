@@ -1,11 +1,19 @@
+from pathlib import Path
+import sys
 from torchvision import transforms
 
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.config import Config
 
-# ── Training transforms ───────────────────────────────────────────────────────
+cfg = Config.from_yaml('configs/default.yaml')
+IMAGE_SIZE =  cfg.image_size
+
+IMAGENET_MEAN = cfg.mean
+IMAGENET_STD  = cfg.std
+
+# -- Training transforms ------------------------------------------------------
 train_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize(IMAGE_SIZE),
     # FIX: RandomHorizontalFlip is NOT safe for volleyball.
     # Flipping a crop mirrors the player's body which is fine, but it also
     # silently mirrors the spatial meaning of "left" vs "right" actions and
@@ -22,7 +30,7 @@ train_transforms = transforms.Compose([
     transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
 ])
 
-# ── Validation / Test transforms ─────────────────────────────────────────────
+# -- Validation / Test transforms ------------------------------------------------------
 eval_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),

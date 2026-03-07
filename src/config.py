@@ -52,7 +52,7 @@ class _Namespace:
         for key, value in data.items():
             self._set(key, value)
 
-    # ── construction helpers ────────────────────────────────────────────────
+    #  construction helpers 
 
     def _set(self, key: str, value: Any) -> None:
         if isinstance(value, dict):
@@ -60,7 +60,7 @@ class _Namespace:
         else:
             self._data[key] = value
 
-    # ── attribute access ────────────────────────────────────────────────────
+    #  attribute access 
 
     def __getattr__(self, key: str) -> Any:
         try:
@@ -83,7 +83,7 @@ class _Namespace:
         except KeyError:
             raise AttributeError(f"Config has no attribute '{key}'")
 
-    # ── dict-like access ────────────────────────────────────────────────────
+    #  dict-like access 
 
     def __getitem__(self, key: str) -> Any:
         return self._data[key]
@@ -115,7 +115,7 @@ class _Namespace:
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
 
-    # ── serialisation ───────────────────────────────────────────────────────
+    #  serialisation 
 
     def to_dict(self) -> dict:
         """Recursively convert to a plain Python dict."""
@@ -124,7 +124,7 @@ class _Namespace:
             out[key] = value.to_dict() if isinstance(value, _Namespace) else value
         return out
 
-    # ── merging ─────────────────────────────────────────────────────────────
+    #  merging 
 
     def _merge_dict(self, override: dict) -> None:
         """Deep-merge *override* into self, in-place."""
@@ -138,7 +138,7 @@ class _Namespace:
             else:
                 self._set(key, value)
 
-    # ── repr ────────────────────────────────────────────────────────────────
+    #  repr 
 
     def __repr__(self) -> str:
         inner = ", ".join(f"{k}={v!r}" for k, v in self._data.items())
@@ -166,7 +166,7 @@ class Config(_Namespace):
     def __init__(self, data: dict) -> None:
         super().__init__(data)
 
-    # ── factories ───────────────────────────────────────────────────────────
+    #  factories 
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Config":
@@ -198,7 +198,7 @@ class Config(_Namespace):
         """Construct a Config directly from a plain dict."""
         return cls(copy.deepcopy(data))
 
-    # ── merging ─────────────────────────────────────────────────────────────
+    #  merging 
 
     def merge(self, override: dict | "Config") -> "Config":
         """Deep-merge *override* into this config (in-place).
@@ -268,7 +268,7 @@ class Config(_Namespace):
             cfg.merge(overrides)
         return cfg
 
-    # ── serialisation ───────────────────────────────────────────────────────
+    #  serialisation 
 
     def to_yaml(self, path: str | Path) -> None:
         """Write the current config to a YAML file.
@@ -289,13 +289,13 @@ class Config(_Namespace):
                 allow_unicode=True,
             )
 
-    # ── convenience helpers ─────────────────────────────────────────────────
+    #  convenience helpers 
 
     def copy(self) -> "Config":
         """Return a deep copy of this config."""
         return Config.from_dict(self.to_dict())
 
-    # ── repr ────────────────────────────────────────────────────────────────
+    #  repr 
 
     def __repr__(self) -> str:
         top_keys = list(self._data.keys())
