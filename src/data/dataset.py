@@ -68,6 +68,9 @@ class VolleyballDataset(Dataset):
                 # Substitute the nearest available frame instead.
                 frames_pil[fid] = self._nearest_frame(clip_dir, fid, frame_ids)
 
+        # FIX 8: Validate that N > 0 (cannot process sample with no players)
+        assert len(players) > 0, f"Sample must have at least 1 player, got {len(players)}"
+
         person_crops = []                               # [N] list of [T, C, H, W]
         for p in players:
             x, y, w, h = p["bbox"]
@@ -78,6 +81,11 @@ class VolleyballDataset(Dataset):
                 # Clamp bbox to image boundaries
                 x1 = max(0, x);       y1 = max(0, y)
                 x2 = min(iw, x + w);  y2 = min(ih, y + h)
+                # Ensure valid crop region (x1 < x2 and y1 < y2)
+                if x2 <= x1 or y2 <= y1:
+                    # Bbox is outside image bounds, use a small fallback crop
+                    x1, y1 = 0, 0
+                    x2, y2 = min(1, iw), min(1, ih)
                 crop = img.crop((x1, y1, x2, y2))
                 if self.transforms:
                     crop = self.transforms(crop)        # [C, H, W]
@@ -122,7 +130,7 @@ class VolleyballDataset(Dataset):
             frame_id    = int(frame_str.replace(".jpg", ""))
 
 
-            group_label = self.cfg.labesls.group_activities.index(group_str)
+            group_label = self.cfg.labels.group_activities.index(group_str)
 
             player_tokens = tokens[2:]
             assert len(player_tokens) % 5 == 0, (
@@ -155,12 +163,19 @@ class VolleyballDataset(Dataset):
         missing_fid: int,
         frame_ids:   list[int],
     ) -> Image.Image:
-        """Return the closest available frame when a specific one is missing."""
+        """Return the closest available frame when a specific one is missing.
+        
+        FIX 7: Use an available frame from the window instead of blank image.
+        This preserves video dimensions and avoids shape mismatches.
+        """
         for fid in sorted(frame_ids, key=lambda f: abs(f - missing_fid)):
             img_path = clip_dir / f"{fid}.jpg"
             if img_path.exists():
                 return Image.open(img_path).convert("RGB")
-        return Image.new("RGB", (720, 1280), color=0)   # blank fallback
+        
+        # If no frames exist in the window, create blank with a safe default
+        # (This shouldn't happen in practice if clip_dir is valid)
+        return Image.new("RGB", (224, 224), color=0)
 
 
 def volleyball_collate(batch: list) -> tuple:

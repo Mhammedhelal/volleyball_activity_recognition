@@ -36,6 +36,8 @@ class SubGroupPooler(nn.Module):
         Returns
           Z : [1, T, z_dim]
         """
+        assert len(subgroup_indices) > 0, "Indices lists are empty"
+
         N, T, embed_dim = P.shape
         Z_sequence = []
 

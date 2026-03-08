@@ -4,13 +4,6 @@ import torch.nn as nn
 from .person_embedder import PersonEmbedder, PERSON_ACTIONS
 from .subgroup_pooler import SubGroupPooler, make_subgroup_indices
 from .frame_descriptor import FrameDescriptor, GROUP_ACTIVITIES
-from ..config import (
-    CNN_OUTPUT_SIZE,
-    LSTM_HIDDEN_P,
-    LSTM_HIDDEN_G,
-    N_SUBGROUPS,
-    POOL,
-)
 
 
 class HierarchicalGroupActivityModel(nn.Module):
@@ -42,13 +35,13 @@ class HierarchicalGroupActivityModel(nn.Module):
 
     def __init__(
         self,
-        cnn_output_size: int = CNN_OUTPUT_SIZE,   # AlexNet fc7
-        lstm_hidden_p:   int = LSTM_HIDDEN_P,    # LSTM1 hidden size
-        lstm_hidden_g:   int = LSTM_HIDDEN_G,    # LSTM2 hidden size
+        cnn_output_size: int = 4096,   # AlexNet fc7
+        lstm_hidden_p:   int = 3000,    # LSTM1 hidden size
+        lstm_hidden_g:   int = 2000,    # LSTM2 hidden size
         person_classes:  int = len(PERSON_ACTIONS),    # 9
         group_classes:   int = len(GROUP_ACTIVITIES),  # 8
-        n_subgroups:     int = N_SUBGROUPS,      # 1=all | 2=left/right | 4=back/front
-        pool:            str = POOL,  # "max" or "avg"
+        n_subgroups:     int = 2,      # 1=all | 2=left/right | 4=back/front
+        pool:            str = "max",  # "max" or "avg"
         n_layers_p:      int = 1,      # LSTM1 depth
         n_layers_g:      int = 1,      # LSTM2 depth
     ):

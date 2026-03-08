@@ -17,6 +17,12 @@ For every test:
   - Print PASS / FAIL
   - On failure: show the test name, the module under test, and the exception
 
+Supports:
+  - Class-level fixture methods (non-test, non-private methods on Test* classes)
+  - Module-level @pytest.fixture functions (scope="module" honoured via shared cache)
+  - @pytest.mark.parametrize (single decorator, stacked decorators → cartesian product)
+  - setup_method / teardown_method lifecycle hooks
+
 Usage
 -----
     python scripts/run_tests.py
@@ -30,6 +36,7 @@ import argparse
 import importlib
 import importlib.util
 import inspect
+import itertools
 import sys
 import traceback
 import yaml
@@ -37,7 +44,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 
 
 # ─────────────────────────────────────────────
@@ -81,7 +87,6 @@ def _load_testing_config(
     src_config = project_root / "src" / "config.py"
 
     if src_config.exists():
-        # Use the project's own Config class
         sys.path.insert(0, str(project_root))
         spec   = importlib.util.spec_from_file_location("src.config", src_config)
         mod    = importlib.util.module_from_spec(spec)
@@ -93,7 +98,6 @@ def _load_testing_config(
                                  if hasattr(testing.module_under_test, "to_dict")
                                  else testing.module_under_test)
     else:
-        # Plain YAML fallback — no src/config.py dependency
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
         testing           = raw.get("testing", {})
@@ -136,21 +140,67 @@ class RunSummary:
 
 
 # ─────────────────────────────────────────────
-# Test discovery and execution
+# Parametrize expansion
 # ─────────────────────────────────────────────
 
-def _collect_test_methods(cls) -> list[tuple[str, Callable]]:
-    """Return all test_* methods on a class, in definition order."""
-    return [
-        (name, fn)
-        for name, fn in inspect.getmembers(cls, predicate=inspect.isfunction)
-        if name.startswith("test")
-    ]
-
-
-def _collect_fixtures(cls) -> dict[str, Callable]:
+def _expand_parametrize(name: str, fn: Callable) -> list[tuple[str, Callable, dict]]:
     """
-    Collect module-scoped fixture methods (non-test, non-private methods).
+    Expand @pytest.mark.parametrize decorators into individual test variants.
+
+    Supports:
+      - Single decorator   → one argname, list of values
+      - Stacked decorators → cartesian product of all param lists
+
+    Returns a list of (display_name, fn, extra_kwargs) tuples.
+    If the function has no parametrize marks, returns [(name, fn, {})].
+    """
+    marks = getattr(fn, "pytestmark", [])
+    param_marks = [m for m in marks if getattr(m, "name", None) == "parametrize"]
+
+    if not param_marks:
+        return [(name, fn, {})]
+
+    # Each mark contributes one axis: (argname, [values])
+    axes = []
+    for mark in param_marks:
+        argname = mark.args[0]
+        values  = mark.args[1]
+        axes.append((argname, values))
+
+    # Cartesian product across all axes
+    variants = []
+    argnames = [a[0] for a in axes]
+    valuelists = [a[1] for a in axes]
+
+    for combo in itertools.product(*valuelists):
+        extra_kwargs = dict(zip(argnames, combo))
+        suffix       = ",".join(f"{k}={v}" for k, v in extra_kwargs.items())
+        display_name = f"{name}[{suffix}]"
+        variants.append((display_name, fn, extra_kwargs))
+
+    return variants
+
+
+# ─────────────────────────────────────────────
+# Test discovery
+# ─────────────────────────────────────────────
+
+def _collect_test_methods(cls) -> list[tuple[str, Callable, dict]]:
+    """
+    Return all test_* methods on a class, expanded for @pytest.mark.parametrize.
+    Each entry is (display_name, fn, extra_kwargs).
+    """
+    results = []
+    for name, fn in inspect.getmembers(cls, predicate=inspect.isfunction):
+        if not name.startswith("test"):
+            continue
+        results.extend(_expand_parametrize(name, fn))
+    return results
+
+
+def _collect_class_fixtures(cls) -> dict[str, Callable]:
+    """
+    Collect class-level fixture methods (non-test, non-private methods).
     Called once per class; results are cached and injected by parameter name.
     """
     return {
@@ -160,35 +210,130 @@ def _collect_fixtures(cls) -> dict[str, Callable]:
     }
 
 
+def _collect_module_fixtures(mod) -> dict[str, Callable]:
+    """
+    Collect module-level @pytest.fixture functions.
+
+    Detection strategy (tried in order — first match wins):
+
+    1. _pytestfixturefunction  — present when pytest is fully initialised
+    2. _fixture_function_marker — older pytest internals
+    3. __wrapped__             — @pytest.fixture wraps the function; the
+                                 wrapper callable is not a plain function so
+                                 inspect.isfunction returns False for it, but
+                                 its __wrapped__ attribute points to the original
+    4. Callable but not a plain function — @pytest.fixture returns a
+                                 FixtureFunctionMarker / SubRequest object;
+                                 detect by checking the type name contains
+                                 "fixture" (case-insensitive)
+
+    Falls back gracefully: if pytest is not installed, none of the test files
+    that use @pytest.fixture will even import successfully, so this is a
+    non-issue in that case.
+    """
+    result = {}
+
+    # Collect plain functions (strategy 1 & 2)
+    for name, obj in inspect.getmembers(mod, inspect.isfunction):
+        if obj.__module__ != mod.__name__:
+            continue
+        if (hasattr(obj, "_pytestfixturefunction") or
+                hasattr(obj, "_fixture_function_marker")):
+            result[name] = obj
+
+    # Collect callables that are NOT plain functions (strategy 3 & 4)
+    # @pytest.fixture wraps the function in a FixtureFunctionMarker which is
+    # callable but not a function — inspect.isfunction returns False for it.
+    for name in dir(mod):
+        if name.startswith("_") or name in result:
+            continue
+        obj = getattr(mod, name)
+        if inspect.isfunction(obj) or inspect.isclass(obj):
+            continue
+        if not callable(obj):
+            continue
+        # Check for __wrapped__ (the original function is stored here)
+        if hasattr(obj, "__wrapped__") and inspect.isfunction(obj.__wrapped__):
+            if getattr(obj.__wrapped__, "__module__", None) == mod.__name__:
+                result[name] = obj.__wrapped__
+            continue
+        # Check type name as last resort
+        type_name = type(obj).__name__.lower()
+        if "fixture" in type_name:
+            # Try to get the underlying callable
+            underlying = getattr(obj, "__func__", None) or getattr(obj, "func", None)
+            if underlying and inspect.isfunction(underlying):
+                result[name] = underlying
+            else:
+                # Store the callable itself — it will be called with no args
+                result[name] = obj
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# Test execution
+# ─────────────────────────────────────────────
+
 def _run_test(
     cls,
-    method_name:    str,
-    fixtures:       dict,
-    cached_fixtures: dict,
+    method_name:          str,
+    fn:                   Callable,
+    fixtures:             dict,
+    cached_fixtures:      dict,
+    extra_kwargs:         dict,
+    module_fixtures:      dict,
+    module_fixture_cache: dict,
 ) -> tuple[bool, str, str, str]:
     """
     Run one test method, injecting fixtures by parameter name.
+
+    Resolution order for each parameter:
+      1. extra_kwargs        — values from @pytest.mark.parametrize
+      2. cached_fixtures     — class-level fixtures already built
+      3. fixtures            — class-level fixture factories (build + cache)
+      4. module_fixture_cache — module-level fixtures already built
+      5. module_fixtures     — module-level @pytest.fixture factories (build + cache)
+
     Returns (passed, exc_type, exc_msg, traceback_str).
     """
-    fn  = getattr(cls, method_name)
-    sig = inspect.signature(fn)
+    sig    = inspect.signature(fn)
+    kwargs = dict(extra_kwargs)   # start with parametrize values
 
-    kwargs: dict = {}
     for param_name in sig.parameters:
         if param_name == "self":
+            continue
+        if param_name in kwargs:
             continue
         if param_name in cached_fixtures:
             kwargs[param_name] = cached_fixtures[param_name]
         elif param_name in fixtures:
             cached_fixtures[param_name] = fixtures[param_name](cls())
             kwargs[param_name] = cached_fixtures[param_name]
+        elif param_name in module_fixture_cache:
+            kwargs[param_name] = module_fixture_cache[param_name]
+        elif param_name in module_fixtures:
+            try:
+                module_fixture_cache[param_name] = module_fixtures[param_name]()
+            except TypeError:
+                module_fixture_cache[param_name] = module_fixtures[param_name].__call__()
+            kwargs[param_name] = module_fixture_cache[param_name]
 
     try:
-        fn(cls(), **kwargs)
+        instance = cls()
+        if hasattr(instance, "setup_method"):
+            instance.setup_method()
+        fn(instance, **kwargs)
+        if hasattr(instance, "teardown_method"):
+            instance.teardown_method()
         return True, "", "", ""
     except Exception as exc:
         return False, type(exc).__name__, str(exc), traceback.format_exc()
 
+
+# ─────────────────────────────────────────────
+# File runner
+# ─────────────────────────────────────────────
 
 def run_test_file(
     test_path:         Path,
@@ -220,6 +365,10 @@ def run_test_file(
         traceback.print_exc()
         return True   # import errors aren't test failures — keep going
 
+    # ── Module-level fixtures (shared across all classes in this file) ────────
+    module_fixtures      = _collect_module_fixtures(mod)
+    module_fixture_cache: dict = {}
+
     # ── Discover Test* classes ────────────────────────────────────────────────
     test_classes = [
         obj for _, obj in inspect.getmembers(mod, inspect.isclass)
@@ -231,25 +380,32 @@ def run_test_file(
         return True
 
     for cls in test_classes:
-        methods         = _collect_test_methods(cls)
-        fixtures        = _collect_fixtures(cls)
+        methods         = _collect_test_methods(cls)   # (display_name, fn, extra_kwargs)
+        fixtures        = _collect_class_fixtures(cls)
         cached_fixtures: dict = {}
 
-        # Eagerly call module-scoped fixtures so failures surface immediately
+        # Eagerly call class-level fixtures so failures surface immediately
         for fname, ffn in fixtures.items():
             try:
                 cached_fixtures[fname] = ffn(cls())
             except Exception:
                 pass   # will fail again at call time with a clear traceback
 
-        for method_name, _ in methods:
+        for display_name, fn, extra_kwargs in methods:
             passed, exc_type, exc_msg, tb = _run_test(
-                cls, method_name, fixtures, cached_fixtures
+                cls            = cls,
+                method_name    = display_name,
+                fn             = fn,
+                fixtures       = fixtures,
+                cached_fixtures = cached_fixtures,
+                extra_kwargs   = extra_kwargs,
+                module_fixtures      = module_fixtures,
+                module_fixture_cache = module_fixture_cache,
             )
             result = TestResult(
                 file       = file_name,
                 class_name = cls.__name__,
-                test_name  = method_name,
+                test_name  = display_name,
                 module     = module_tag,
                 passed     = passed,
                 exc_type   = exc_type,
@@ -258,7 +414,7 @@ def run_test_file(
             )
             summary.results.append(result)
 
-            label  = f"{cls.__name__}.{method_name}"
+            label  = f"{cls.__name__}.{display_name}"
             status = GREEN("PASS") if passed else RED("FAIL")
 
             if passed:
@@ -380,7 +536,6 @@ def main() -> None:
     print(DIM(f"Tests dir: {tests_dir}"))
 
     # ── Discover test files ───────────────────────────────────────────────────
-    # Preserve the order from module_under_test, then append any extra test_*.py
     if args.file:
         test_files = [tests_dir / args.file]
     else:

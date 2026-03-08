@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from src.config import Config
-cfg = Config.from_yaml('/configs/default.yaml')
+cfg = Config.from_yaml('configs/default.yaml')
 LSTM_HIDDEN_G = cfg.group_lstm.hidden_dim
 
 GROUP_ACTIVITIES = cfg.labels.group_activities

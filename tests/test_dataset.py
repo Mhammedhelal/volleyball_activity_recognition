@@ -6,18 +6,19 @@ Unit tests for VolleyballDataset and volleyball_collate.
 
 import sys
 from pathlib import Path
+import tempfile
+import shutil
 import pytest
 import torch
 from unittest.mock import patch, MagicMock
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
+from src.config import Config
 from src.data.dataset import VolleyballDataset, volleyball_collate
 
 
 # ─────────────────────────────────────────────
-# Fixtures
+# Constants
 # ─────────────────────────────────────────────
 
 ANNOTATION_LINES = [
@@ -65,6 +66,7 @@ def make_fake_dataset(tmp_path: Path, T: int = 9) -> VolleyballDataset:
     return VolleyballDataset(
         root         = tmp_path,
         split_videos = {video_id},
+        cfg = Config.from_yaml('configs/default.yaml'),
         transforms   = simple_transform,
         T            = T,
     )
@@ -76,14 +78,23 @@ def make_fake_dataset(tmp_path: Path, T: int = 9) -> VolleyballDataset:
 
 class TestVolleyballDataset:
 
-    def test_length(self, tmp_path):
-        ds = make_fake_dataset(tmp_path)
+    def setup_method(self):
+        """Create a temporary directory for each test."""
+        self.tmp_path = Path(tempfile.mkdtemp())
+
+    def teardown_method(self):
+        """Clean up temporary directory after each test."""
+        if self.tmp_path.exists():
+            shutil.rmtree(self.tmp_path)
+
+    def test_length(self):
+        ds = make_fake_dataset(self.tmp_path)
         # 2 annotation lines → 2 samples, but only frame 23455 has images
         # (frame 23460 will trigger _nearest_frame fallback)
         assert len(ds) == len(ANNOTATION_LINES)
 
-    def test_sample_shapes(self, tmp_path):
-        ds = make_fake_dataset(tmp_path)
+    def test_sample_shapes(self):
+        ds = make_fake_dataset(self.tmp_path)
         x, group_label, person_labels = ds[0]
 
         assert x.shape == (PLAYER_COUNT, T, C, H, W), (
@@ -92,39 +103,39 @@ class TestVolleyballDataset:
         assert group_label.shape  == (1,),            f"group_label shape: {group_label.shape}"
         assert person_labels.shape == (PLAYER_COUNT,), f"person_labels shape: {person_labels.shape}"
 
-    def test_group_label_dtype(self, tmp_path):
-        ds = make_fake_dataset(tmp_path)
+    def test_group_label_dtype(self):
+        ds = make_fake_dataset(self.tmp_path)
         _, group_label, _ = ds[0]
         assert group_label.dtype == torch.long
 
-    def test_person_labels_dtype(self, tmp_path):
-        ds = make_fake_dataset(tmp_path)
+    def test_person_labels_dtype(self):
+        ds = make_fake_dataset(self.tmp_path)
         _, _, person_labels = ds[0]
         assert person_labels.dtype == torch.long
 
-    def test_group_label_in_range(self, tmp_path):
-        ds = make_fake_dataset(tmp_path)
+    def test_group_label_in_range(self):
+        ds = make_fake_dataset(self.tmp_path)
         _, group_label, _ = ds[0]
         assert 0 <= group_label.item() < 8, f"group_label out of range: {group_label.item()}"
 
-    def test_person_labels_in_range(self, tmp_path):
-        ds = make_fake_dataset(tmp_path)
+    def test_person_labels_in_range(self):
+        ds = make_fake_dataset(self.tmp_path)
         _, _, person_labels = ds[0]
         assert all(0 <= l.item() < 9 for l in person_labels), (
             f"person_labels out of range: {person_labels}"
         )
 
-    def test_players_sorted_by_x(self, tmp_path):
+    def test_players_sorted_by_x(self):
         """Players must be sorted left→right (ascending bbox_center_x)."""
-        ds       = make_fake_dataset(tmp_path)
+        ds       = make_fake_dataset(self.tmp_path)
         _, vid   = ds.samples[0]
         players  = sorted(vid["players"], key=lambda p: p["bbox_center_x"])
         centers  = [p["bbox_center_x"] for p in players]
         assert centers == sorted(centers), f"Players not sorted: {centers}"
 
-    def test_missing_frame_fallback(self, tmp_path):
+    def test_missing_frame_fallback(self):
         """Dataset must not raise on a missing frame — nearest fallback used."""
-        ds = make_fake_dataset(tmp_path)
+        ds = make_fake_dataset(self.tmp_path)
         # Sample index 1 references frame 23460 which has no images on disk
         try:
             x, _, _ = ds[1]
@@ -132,15 +143,20 @@ class TestVolleyballDataset:
         except FileNotFoundError:
             pytest.fail("Dataset raised FileNotFoundError on missing frame")
 
-    def test_temporal_window_size(self, tmp_path):
+    def test_temporal_window_size(self):
         for T_val in (5, 9):
-            ds = make_fake_dataset(tmp_path, T=T_val)
-            x, _, _ = ds[0]
-            assert x.shape[1] == T_val, f"Expected T={T_val}, got {x.shape[1]}"
+            # Create a fresh tmp_path for each T value to avoid conflicts
+            tmp_path_t = Path(tempfile.mkdtemp())
+            try:
+                ds = make_fake_dataset(tmp_path_t, T=T_val)
+                x, _, _ = ds[0]
+                assert x.shape[1] == T_val, f"Expected T={T_val}, got {x.shape[1]}"
+            finally:
+                shutil.rmtree(tmp_path_t)
 
-    def test_odd_T_assertion(self, tmp_path):
+    def test_odd_T_assertion(self):
         with pytest.raises(AssertionError):
-            VolleyballDataset(tmp_path, split_videos={1}, T=8)
+            VolleyballDataset(self.tmp_path, split_videos={1}, cfg=Config.from_yaml('configs/default.yaml'), T=8)
 
 
 # ─────────────────────────────────────────────
