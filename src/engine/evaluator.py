@@ -1,90 +1,84 @@
 """
-Evaluator for the hierarchical group activity model.
+src/engine/evaluator.py
+------------------------
+Evaluator for both the hierarchical model and all baseline models.
 
-Computes per-class and overall accuracy for both:
-  - group activity classification  (main task)
-  - individual person action classification (auxiliary task)
-
-Mirrors the evaluation protocol from the paper (Section 4):
-accuracy = correct predictions / total predictions
+Uses the same INPUT_TYPE / HAS_PERSON_LOSS flags as trainer.py —
+see trainer.py docstring for routing details.
 """
-
 
 import torch
 
 from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
 from src.utils.metrics import MetricsTracker
 
+_DEFAULT_INPUT_TYPE      = "crops"
+_DEFAULT_HAS_PERSON_LOSS = True
+
 
 class Evaluator:
     """
-    Evaluates a trained HierarchicalGroupActivityModel on a dataset split.
+    Evaluates a trained model on a dataset split.
 
     Args:
-        model       : HierarchicalGroupActivityModel
-        val_loader  : DataLoader using volleyball_collate
-                      yields (frames_list, group_labels, person_labels_list)
-        device      : "cuda" or "cpu"
+        model      : HierarchicalGroupActivityModel or any BaselineModel
+        val_loader : DataLoader using volleyball_collate (4-tuple)
+        cfg        : Config  (passed through for report formatting)
+        device     : "cuda" or "cpu"
     """
 
-    def __init__(self, model, val_loader, device: str = "cuda"):
+    def __init__(self, model, val_loader, cfg=None, device: str = "cuda"):
         self.model      = model.to(device)
         self.val_loader = val_loader
+        self.cfg        = cfg
         self.device     = device
 
-        # One tracker per task
+        self.input_type      = getattr(model, "INPUT_TYPE",      _DEFAULT_INPUT_TYPE)
+        self.has_person_loss = getattr(model, "HAS_PERSON_LOSS", _DEFAULT_HAS_PERSON_LOSS)
+
         self.group_tracker  = MetricsTracker(len(GROUP_ACTIVITIES), GROUP_ACTIVITIES)
         self.person_tracker = MetricsTracker(len(PERSON_ACTIONS),   PERSON_ACTIONS)
 
     @torch.no_grad()
     def evaluate(self) -> dict:
-        """
-        Run a full evaluation pass.
-
-        Returns
-        -------
-        dict with keys:
-            group_accuracy   : float
-            person_accuracy  : float
-            group_per_class  : dict[str, float]
-            person_per_class : dict[str, float]
-            group_correct    : int
-            group_total      : int
-            person_correct   : int
-            person_total     : int
-            group_confusion  : torch.Tensor [8, 8]
-            person_confusion : torch.Tensor [9, 9]
-        """
+        """Run a full evaluation pass. Returns metrics dict."""
         self.model.eval()
-
         self.group_tracker.reset()
         self.person_tracker.reset()
 
-        for frames_list, group_labels, person_labels_list in self.val_loader:
-            # frames_list        : list[B] of [N_i, T, C, H, W]
-            # group_labels       : [B]
-            # person_labels_list : list[B] of [N_i]
+        for batch in self.val_loader:
+            crops_list, full_frames, group_labels, person_labels_list = batch
 
+            full_frames  = full_frames.to(self.device)
             group_labels = group_labels.to(self.device)
 
-            for i, (frames, person_labels) in enumerate(
-                zip(frames_list, person_labels_list)
+            for i, (crops, person_labels) in enumerate(
+                zip(crops_list, person_labels_list)
             ):
-                frames        = frames.to(self.device)
+                crops         = crops.to(self.device)
                 person_labels = person_labels.to(self.device)
 
-                group_logits, person_logits = self.model(frames)
-                # group_logits  : [8]
-                # person_logits : [N_i, 9]
+                # ── select input ─────────────────────────────────────────────
+                x = full_frames[i] if self.input_type == "frame" else crops
 
+                # ── forward ──────────────────────────────────────────────────
+                if self.has_person_loss:
+                    group_logits, person_logits = self.model(x)
+                else:
+                    group_logits  = self.model(x)
+                    person_logits = None
+
+                # ── update trackers ──────────────────────────────────────────
+                g_label = group_labels[i].view(1)
                 self.group_tracker.update(
-                    preds   = group_logits.argmax().unsqueeze(0),  # [1]
-                    targets = group_labels[i].unsqueeze(0),        # [1]
+                    preds   = group_logits.argmax().unsqueeze(0),
+                    targets = g_label,
                 )
-                self.person_tracker.update(
-                    preds   = person_logits.argmax(dim=-1),        # [N_i]
-                    targets = person_labels,                       # [N_i]
-                )
+                if self.has_person_loss and person_logits is not None:
+                    self.person_tracker.update(
+                        preds   = person_logits.argmax(dim=-1),
+                        targets = person_labels,
+                    )
 
         group_summary  = self.group_tracker.summary()
         person_summary = self.person_tracker.summary()
@@ -105,40 +99,31 @@ class Evaluator:
     def report(self) -> None:
         """Print a formatted evaluation report to stdout."""
         results = self.evaluate()
-        W = 24
 
-        print("\n" + "=" * 70)
+        width = 70
+        print("\n" + "=" * width)
         print("EVALUATION RESULTS")
-        print("=" * 70)
+        print("=" * width)
 
-        # ── Group activity ────────────────────────────────────────────────────
-        print(
-            f"\nGroup Activity Accuracy: "
-            f"{results['group_accuracy'] * 100:.2f}%  "
-            f"({results['group_correct']}/{results['group_total']})"
-        )
-        print("-" * 70)
-        print(f"  {'Class':<{W}} {'Accuracy':>10}")
-        print(f"  {'-'*W} {'-'*10}")
+        g_acc     = results["group_accuracy"]
+        g_correct = results["group_correct"]
+        g_total   = results["group_total"]
+        print(f"\nGroup Activity Accuracy: {g_acc*100:.2f}%  ({g_correct}/{g_total})")
+        print("-" * width)
+        print(f"  {'Class':<28}{'Accuracy':>10}")
+        print(f"  {'------':<28}{'--------':>10}")
         for cls, acc in results["group_per_class"].items():
-            print(f"  {cls:<{W}} {acc * 100:>9.2f}%")
+            print(f"  {cls:<28}{acc*100:>9.2f}%")
 
-        print(f"\n  Confusion Matrix (rows=truth, cols=predicted):")
-        print(self.group_tracker.pretty_confusion_matrix())
+        if self.has_person_loss:
+            p_acc     = results["person_accuracy"]
+            p_correct = results["person_correct"]
+            p_total   = results["person_total"]
+            print(f"\nPerson Action Accuracy: {p_acc*100:.2f}%  ({p_correct}/{p_total})")
+            print("-" * width)
+            print(f"  {'Class':<28}{'Accuracy':>10}")
+            print(f"  {'------':<28}{'--------':>10}")
+            for cls, acc in results["person_per_class"].items():
+                print(f"  {cls:<28}{acc*100:>9.2f}%")
 
-        # ── Person action ─────────────────────────────────────────────────────
-        print(
-            f"\nPerson Action Accuracy:  "
-            f"{results['person_accuracy'] * 100:.2f}%  "
-            f"({results['person_correct']}/{results['person_total']})"
-        )
-        print("-" * 70)
-        print(f"  {'Class':<{W}} {'Accuracy':>10}")
-        print(f"  {'-'*W} {'-'*10}")
-        for cls, acc in results["person_per_class"].items():
-            print(f"  {cls:<{W}} {acc * 100:>9.2f}%")
-
-        print(f"\n  Confusion Matrix (rows=truth, cols=predicted):")
-        print(self.person_tracker.pretty_confusion_matrix())
-
-        print("=" * 70 + "\n")
+        print("\n" + "=" * width + "\n")

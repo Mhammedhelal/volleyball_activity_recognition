@@ -1,8 +1,21 @@
+"""
+src/data/dataset.py
+-------------------
+PyTorch Dataset for volleyball activity recognition.
+
+__getitem__ returns a 4-tuple:
+    crops        [N, T, C, H, W]  – per-person temporal crops  (used by B2/B3/B5/B6/B7 + full model)
+    full_frame   [T, C, H, W]     – full-frame temporal sequence (used by B1/B4)
+    group_label  [1]              – team activity class index
+    person_labels[N]              – individual action class indices
+
+volleyball_collate handles the variable-N dimension and the new full_frame field.
+"""
+
 from torch.utils.data import Dataset
 from pathlib import Path
 import torch
 from PIL import Image
-
 
 import sys
 from src.config import Config
@@ -13,27 +26,23 @@ class VolleyballDataset(Dataset):
         self,
         root:         Path,
         split_videos: set[int],
-        cfg: Config,
+        cfg:          Config,
         transforms=None,
-        T: int = 9,
+        T:            int = 9,
     ):
         assert T % 2 == 1, f"T must be odd for a symmetric window, got {T}"
 
         self.root       = Path(root)
-        self.cfg = cfg
+        self.cfg        = cfg
         self.transforms = transforms
         self.T          = T
         self.half       = T // 2
 
-        self.samples = []   # list of (video_id, annotation)
+        self.samples = []   # list of (video_id, annotation_dict)
 
         for video_id in split_videos:
             ann_file = self.root / str(video_id) / "annotations.txt"
             for ann in self._parse_annotations(ann_file):
-                # FIX 1: _parse_annotations returned bare dicts, but the
-                # original __init__ called self.samples.extend() expecting
-                # (video_id, ann) tuples.  The parser never attached video_id,
-                # so __getitem__ had no way to build the correct path.
                 self.samples.append((video_id, ann))
 
     def __len__(self) -> int:
@@ -46,44 +55,35 @@ class VolleyballDataset(Dataset):
         group_label = ann["group_label"]
         players     = ann["players"]
 
-        # 1. sort players left → right (required by make_subgroup_indices)
+        # Sort players left → right (required by subgroup logic)
         players = sorted(players, key=lambda p: p["bbox_center_x"])
 
-        # 2. symmetric temporal window around frame_id
+        # Symmetric temporal window around frame_id
         frame_ids = list(range(frame_id - self.half, frame_id + self.half + 1))
-
-        # FIX 2: original loop accumulated [T][N] then stacked to [T, N, C, H, W]
-        # which torch.stack(crops, dim=1) would incorrectly produce [T, N, C, H, W].
-        # Correct target is [N, T, C, H, W] so we accumulate per-person across time.
-        clip_dir = self.root / str(video_id) / str(frame_id)
+        clip_dir  = self.root / str(video_id) / str(frame_id)
 
         # Pre-load all T frames once to avoid re-opening the same file per player
-        frames_pil = {}
+        frames_pil: dict[int, Image.Image] = {}
         for fid in frame_ids:
             img_path = clip_dir / f"{fid}.jpg"
             if img_path.exists():
                 frames_pil[fid] = Image.open(img_path).convert("RGB")
             else:
-                # FIX 3: original raised FileNotFoundError on missing frames.
-                # Substitute the nearest available frame instead.
                 frames_pil[fid] = self._nearest_frame(clip_dir, fid, frame_ids)
 
-        # FIX 8: Validate that N > 0 (cannot process sample with no players)
-        assert len(players) > 0, f"Sample must have at least 1 player, got {len(players)}"
+        assert len(players) > 0, f"Sample must have at least 1 player"
 
-        person_crops = []                               # [N] list of [T, C, H, W]
+        # ── person crops: [N, T, C, H, W] ────────────────────────────────────
+        person_crops = []
         for p in players:
             x, y, w, h = p["bbox"]
             t_crops = []
             for fid in frame_ids:
                 img    = frames_pil[fid]
                 iw, ih = img.size
-                # Clamp bbox to image boundaries
                 x1 = max(0, x);       y1 = max(0, y)
                 x2 = min(iw, x + w);  y2 = min(ih, y + h)
-                # Ensure valid crop region (x1 < x2 and y1 < y2)
                 if x2 <= x1 or y2 <= y1:
-                    # Bbox is outside image bounds, use a small fallback crop
                     x1, y1 = 0, 0
                     x2, y2 = min(1, iw), min(1, ih)
                 crop = img.crop((x1, y1, x2, y2))
@@ -92,44 +92,43 @@ class VolleyballDataset(Dataset):
                 t_crops.append(crop)
             person_crops.append(torch.stack(t_crops, dim=0))   # [T, C, H, W]
 
-        x = torch.stack(person_crops, dim=0)            # [N, T, C, H, W]
+        crops = torch.stack(person_crops, dim=0)        # [N, T, C, H, W]
 
+        # ── full frames: [T, C, H, W] ─────────────────────────────────────────
+        # Used by frame-level baselines (B1, B4).  We apply the same transforms
+        # as for crops so the backbone sees the same normalisation.
+        full_frames = []
+        for fid in frame_ids:
+            img = frames_pil[fid]
+            if self.transforms:
+                img = self.transforms(img)              # [C, H, W]
+            full_frames.append(img)
+        full_frame = torch.stack(full_frames, dim=0)    # [T, C, H, W]
+
+        # ── labels ────────────────────────────────────────────────────────────
         person_labels = torch.tensor(
             [p["action_id"] for p in players], dtype=torch.long
         )                                               # [N]
 
-        # FIX 4: group_label was returned as a raw int.
-        # Wrap in a [1] tensor so volleyball_collate can torch.cat cleanly.
         group_label_tensor = torch.tensor([group_label], dtype=torch.long)  # [1]
 
-        assert x.shape[0] == len(person_labels), "Mismatch: N players"
-        assert x.shape[1] == self.T,             "Mismatch: temporal window"
+        assert crops.shape[0] == len(person_labels), "Mismatch: N players"
+        assert crops.shape[1] == self.T,             "Mismatch: temporal window"
 
-        return x, group_label_tensor, person_labels
+        return crops, full_frame, group_label_tensor, person_labels
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _parse_annotations(self, ann_file: Path) -> list[dict]:
-        """
-        Parse one annotations.txt file.
-
-        Line format:
-            <frame>.jpg  <group_label>  x y w h action  x y w h action  ...
-        """
         samples = []
-
         with open(ann_file, "r") as f:
             lines = [l.strip() for l in f if l.strip()]
 
         for line in lines:
-            tokens = line.split()
-
+            tokens    = line.split()
             frame_str = tokens[0]
             group_str = tokens[1]
-
-            frame_id    = int(frame_str.replace(".jpg", ""))
-
-
+            frame_id  = int(frame_str.replace(".jpg", ""))
             group_label = self.cfg.labels.group_activities.index(group_str)
 
             player_tokens = tokens[2:]
@@ -141,7 +140,6 @@ class VolleyballDataset(Dataset):
             for i in range(0, len(player_tokens), 5):
                 x, y, w, h = map(int, player_tokens[i : i + 4])
                 action     = player_tokens[i + 4]
-
                 players.append({
                     "bbox":          (x, y, w, h),
                     "bbox_center_x": x + w / 2,
@@ -163,18 +161,10 @@ class VolleyballDataset(Dataset):
         missing_fid: int,
         frame_ids:   list[int],
     ) -> Image.Image:
-        """Return the closest available frame when a specific one is missing.
-        
-        FIX 7: Use an available frame from the window instead of blank image.
-        This preserves video dimensions and avoids shape mismatches.
-        """
         for fid in sorted(frame_ids, key=lambda f: abs(f - missing_fid)):
             img_path = clip_dir / f"{fid}.jpg"
             if img_path.exists():
                 return Image.open(img_path).convert("RGB")
-        
-        # If no frames exist in the window, create blank with a safe default
-        # (This shouldn't happen in practice if clip_dir is valid)
         return Image.new("RGB", (224, 224), color=0)
 
 
@@ -182,28 +172,22 @@ def volleyball_collate(batch: list) -> tuple:
     """
     Custom collate for the Volleyball dataset.
 
-    The standard DataLoader collate assumes every tensor in a batch shares
-    the same shape. N (number of players) varies across samples, so we
-    cannot stack along a batch dimension.
-
     Each sample from VolleyballDataset.__getitem__ is:
-        x              [N_i, T, C, H, W]   person crops
-        group_label    [1]                 team activity class index
-        person_labels  [N_i]               individual action class indices
+        crops         [N_i, T, C, H, W]   person crops
+        full_frame    [T, C, H, W]         full-frame sequence
+        group_label   [1]                  team activity class index
+        person_labels [N_i]                individual action class indices
 
     Returns
     -------
-    frames_list        : list[B] of [N_i, T, C, H, W]
-        One tensor per sample. Kept as a list because N_i differs.
-
-    group_labels       : LongTensor [B]
-        Safe to stack — always exactly one label per sample.
-
-    person_labels_list : list[B] of [N_i]
-        One tensor per sample. Kept as a list because N_i differs.
+    crops_list         : list[B] of [N_i, T, C, H, W]   variable N — kept as list
+    full_frames        : FloatTensor [B, T, C, H, W]     fixed shape — stacked
+    group_labels       : LongTensor  [B]
+    person_labels_list : list[B] of [N_i]                variable N — kept as list
     """
-    frames_list        = [sample[0] for sample in batch]    # list of [N_i, T, C, H, W]
-    group_labels       = torch.cat([sample[1] for sample in batch], dim=0)  # [B]
-    person_labels_list = [sample[2] for sample in batch]    # list of [N_i]
+    crops_list         = [s[0] for s in batch]
+    full_frames        = torch.stack([s[1] for s in batch], dim=0)     # [B, T, C, H, W]
+    group_labels       = torch.cat([s[2] for s in batch], dim=0)       # [B]
+    person_labels_list = [s[3] for s in batch]
 
-    return frames_list, group_labels, person_labels_list
+    return crops_list, full_frames, group_labels, person_labels_list
