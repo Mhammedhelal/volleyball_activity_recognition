@@ -11,7 +11,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.models.subgroup_pooler import SubGroupPooler, make_subgroup_indices
+from src.models.subgroup_pooler import SubGroupPooler
+from src.utils.subgroups import make_subgroup_indices
 
 
 # ─────────────────────────────────────────────

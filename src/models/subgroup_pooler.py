@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from ..utils.subgroups import make_subgroup_indices
 
 
 

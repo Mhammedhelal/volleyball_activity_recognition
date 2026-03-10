@@ -4,6 +4,7 @@ Training loop and trainer utilities for the hierarchical group activity model.
 
 import torch
 import torch.nn as nn
+from typing import Iterable
 
 from src.utils.metrics import AverageMeter, MetricsTracker
 from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
@@ -20,6 +21,9 @@ class Trainer:
 
     Args:
         model          : HierarchicalGroupActivityModel
+        params         : iterable of parameters the optimizer should update.
+                         Stage 1 → person_embedder params only
+                         Stage 2 → subgroup_pooler + frame_descriptor params only
         train_loader   : DataLoader using volleyball_collate
                          yields (frames_list, group_labels, person_labels_list)
                            frames_list        list[B] of [N_i, T, C, H, W]
@@ -36,6 +40,7 @@ class Trainer:
     def __init__(
         self,
         model,
+        params:         Iterable[nn.Parameter],
         train_loader,
         device:         str   = "cuda",
         learning_rate:  float = 1e-5,
@@ -51,8 +56,10 @@ class Trainer:
         self.person_loss_w  = person_loss_w
         self.log_every      = log_every
 
+        # Only the params for the active stage are passed in — the optimizer
+        # never sees (and never updates) the frozen stage's parameters.
         self.optimizer = torch.optim.SGD(
-            model.parameters(),
+            params,
             lr=learning_rate,
             momentum=momentum,
         )
@@ -62,8 +69,8 @@ class Trainer:
 
         # Metric trackers — reset each epoch inside train_epoch()
         self.loss_meter     = AverageMeter(name="loss")
-        self.group_tracker  = MetricsTracker(len(GROUP_ACTIVITIES), GROUP_ACTIVITIES)
-        self.person_tracker = MetricsTracker(len(PERSON_ACTIONS),   PERSON_ACTIONS)
+        self.group_tracker  = MetricsTracker(name="group_activity", num_classes=len(GROUP_ACTIVITIES))
+        self.person_tracker = MetricsTracker(name="person_action", num_classes=len(PERSON_ACTIONS))
 
     def train_epoch(self) -> dict:
         """
@@ -112,12 +119,12 @@ class Trainer:
                 # Accumulate predictions into trackers (detached — no grad needed)
                 with torch.no_grad():
                     self.group_tracker.update(
-                        preds   = group_logits.argmax().unsqueeze(0),  # [1]
-                        targets = group_labels[i].unsqueeze(0),        # [1]
+                        pred   = group_logits.argmax().unsqueeze(0),  # [1]
+                        target = group_labels[i].unsqueeze(0),        # [1]
                     )
                     self.person_tracker.update(
-                        preds   = person_logits.argmax(dim=-1),        # [N_i]
-                        targets = person_labels,                       # [N_i]
+                        pred   = person_logits.argmax(dim=-1),        # [N_i]
+                        target = person_labels,                       # [N_i]
                     )
 
             # Average loss over the batch then step

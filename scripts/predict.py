@@ -34,6 +34,7 @@ from src.config import Config
 from src.data.dataset import VolleyballDataset
 from src.data.transforms import eval_transforms
 from src.models.hierarchical_model import HierarchicalGroupActivityModel
+from src.models.person_embedder import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 
 
 # ---------------------------------------------
@@ -41,8 +42,17 @@ from src.models.hierarchical_model import HierarchicalGroupActivityModel
 # ---------------------------------------------
 
 def build_model(cfg: Config, checkpoint: Path, device: str) -> HierarchicalGroupActivityModel:
+    if cfg.cnn.backbone == "alexnet":
+        feature_extractor = build_alexnet_fc7
+    elif cfg.cnn.backbone == "resnet50":
+        feature_extractor = build_resnet50
+    elif cfg.cnn.backbone == "mobilenet_v3_large":
+        feature_extractor = build_mobilenet_v3_large
+    else:
+        raise ValueError(f"Unknown backbone: {cfg.cnn.backbone}")
+
     model = HierarchicalGroupActivityModel(
-        cnn_output_size = cfg.cnn.feature_dim,
+        feature_extractor = feature_extractor,
         lstm_hidden_p   = cfg.person_lstm.hidden_dim,
         lstm_hidden_g   = cfg.group_lstm.hidden_dim,
         person_classes  = cfg.labels.num_person_classes,
@@ -68,7 +78,12 @@ def load_sample(
         x       [N, T, C, H, W]   ready for model.forward()
         players list[dict]        sorted left→right, with action/bbox info
     """
+    # Resolve data_root path relative to project root if it's relative
     data_root = Path(cfg.paths.data_root)
+    if not data_root.is_absolute():
+        project_root = Path(__file__).resolve().parent.parent
+        data_root = project_root / data_root
+    
     ann_file  = data_root / str(video_id) / "annotations.txt"
 
     # Re-use the dataset parser — no need to duplicate logic
@@ -215,8 +230,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # -- Config ---------------------------------------------
-    cfg = Config.from_yaml(args.config)
+    # -- Config - resolve relative paths from project root -----
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        project_root = Path(__file__).resolve().parent.parent
+        config_path = project_root / config_path
+    
+    cfg = Config.from_yaml(config_path)
     if args.device is not None:
         cfg.merge({"training": {"device": args.device}})
     device = cfg.training.device

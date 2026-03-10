@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.models.person_embedder import PersonEmbedder
+from src.models.person_embedder import PersonEmbedder, build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 
 
 # ─────────────────────────────────────────────
@@ -32,47 +32,91 @@ EMBED_DIM            = CNN_DIM + LSTM_HIDDEN   # 4608
 class TestPersonEmbedderShapes:
 
     def setup_method(self):
-        """Create embedder and sample input for each test."""
-        self.embedder = PersonEmbedder(
-            cnn_output_size=CNN_DIM,
+        """Create sample input for each test."""
+        self.sample_input = torch.randn(N, T, C, H, W)
+
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_person_logits_shape(self, feature_extractor):
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
             lstm_hidden=LSTM_HIDDEN,
             person_classes=PERSON_CLASSES,
             n_layers=1,
         )
-        self.sample_input = torch.randn(N, T, C, H, W)
-
-    def test_person_logits_shape(self):
-        person_logits, _ = self.embedder(self.sample_input)
+        person_logits, _ = embedder(self.sample_input)
         assert person_logits.shape == (N, PERSON_CLASSES), (
             f"Expected [{N}, {PERSON_CLASSES}], got {person_logits.shape}"
         )
 
-    def test_P_shape(self):
-        _, P = self.embedder(self.sample_input)
-        assert P.shape == (N, T, EMBED_DIM), (
-            f"Expected [{N}, {T}, {EMBED_DIM}], got {P.shape}"
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_P_shape(self, feature_extractor):
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
+        _, P = embedder(self.sample_input)
+        embed_dim = embedder.cnn_dim + LSTM_HIDDEN
+        assert P.shape == (N, T, embed_dim), (
+            f"Expected [{N}, {T}, {embed_dim}], got {P.shape}"
         )
 
-    def test_P_temporal_dim_preserved(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_P_temporal_dim_preserved(self, feature_extractor):
         """P must retain all T timesteps — not collapsed to last frame."""
-        _, P = self.embedder(self.sample_input)
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
+        _, P = embedder(self.sample_input)
         assert P.shape[1] == T, (
             f"Temporal dimension collapsed: expected {T}, got {P.shape[1]}"
         )
 
-    def test_variable_N(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_output_shapes(self, feature_extractor):
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
+        person_logits, P = embedder(self.sample_input)
+        embed_dim = embedder.cnn_dim + LSTM_HIDDEN
+        assert person_logits.shape == (N, PERSON_CLASSES)
+        assert P.shape == (N, T, embed_dim)
+
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_variable_N(self, feature_extractor):
         """Output shapes must scale with N."""
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
+        embed_dim = embedder.cnn_dim + LSTM_HIDDEN
         for n in (1, 6, 12):
             x             = torch.randn(n, T, C, H, W)
-            logits, P     = self.embedder(x)
+            logits, P     = embedder(x)
             assert logits.shape == (n, PERSON_CLASSES)
-            assert P.shape      == (n, T, EMBED_DIM)
+            assert P.shape      == (n, T, embed_dim)
 
-    def test_variable_T(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_variable_T(self, feature_extractor):
         """Output shapes must scale with T."""
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
         for t in (5, 9):
             x         = torch.randn(N, t, C, H, W)
-            _, P      = self.embedder(x)
+            _, P      = embedder(x)
             assert P.shape[1] == t, f"Expected T={t}, got {P.shape[1]}"
 
 
@@ -82,31 +126,43 @@ class TestPersonEmbedderShapes:
 
 class TestPersonEmbedderCNN:
 
-    def setup_method(self):
-        """Create embedder for each test."""
-        self.embedder = PersonEmbedder(
-            cnn_output_size=CNN_DIM,
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_cnn_frozen(self, feature_extractor):
+        """CNN backbone must be frozen — no gradients."""
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
             lstm_hidden=LSTM_HIDDEN,
             person_classes=PERSON_CLASSES,
             n_layers=1,
         )
-
-    def test_cnn_frozen(self):
-        """AlexNet backbone must be frozen — no gradients."""
-        for name, param in self.embedder.cnn.named_parameters():
+        for name, param in embedder.cnn.named_parameters():
             assert not param.requires_grad, (
                 f"CNN param '{name}' has requires_grad=True (should be frozen)"
             )
 
-    def test_lstm_trainable(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_lstm_trainable(self, feature_extractor):
         """LSTM1 weights must be trainable."""
-        for name, param in self.embedder.lstm.named_parameters():
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
+        for name, param in embedder.lstm.named_parameters():
             assert param.requires_grad, (
                 f"LSTM param '{name}' has requires_grad=False"
             )
 
-    def test_person_fc_trainable(self):
-        for name, param in self.embedder.person_fc.named_parameters():
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_person_fc_trainable(self, feature_extractor):
+        embedder = PersonEmbedder(
+            feature_extractor=feature_extractor,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+            n_layers=1,
+        )
+        for name, param in embedder.person_fc.named_parameters():
             assert param.requires_grad, (
                 f"person_fc param '{name}' has requires_grad=False"
             )
@@ -118,9 +174,10 @@ class TestPersonEmbedderCNN:
 
 class TestPersonEmbedderGradients:
 
-    def test_gradient_flows_to_lstm(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_gradient_flows_to_lstm(self, feature_extractor):
         """Loss backward must produce gradients in LSTM1 weights."""
-        model = PersonEmbedder(CNN_DIM, LSTM_HIDDEN, PERSON_CLASSES)
+        model = PersonEmbedder(feature_extractor=feature_extractor, lstm_hidden=LSTM_HIDDEN, person_classes=PERSON_CLASSES)
         x     = torch.randn(4, T, C, H, W)
         logits, _ = model(x)
         loss  = logits.sum()
@@ -130,9 +187,10 @@ class TestPersonEmbedderGradients:
             assert param.grad is not None, f"No gradient for LSTM param '{name}'"
             assert param.grad.abs().sum() > 0, f"Zero gradient for LSTM param '{name}'"
 
-    def test_no_gradient_in_cnn(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_no_gradient_in_cnn(self, feature_extractor):
         """CNN backbone must not accumulate gradients."""
-        model = PersonEmbedder(CNN_DIM, LSTM_HIDDEN, PERSON_CLASSES)
+        model = PersonEmbedder(feature_extractor=feature_extractor, lstm_hidden=LSTM_HIDDEN, person_classes=PERSON_CLASSES)
         x     = torch.randn(4, T, C, H, W)
         logits, _ = model(x)
         logits.sum().backward()

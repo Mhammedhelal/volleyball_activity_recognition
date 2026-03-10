@@ -19,6 +19,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.models.hierarchical_model import HierarchicalGroupActivityModel
+from src.models.person_embedder import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 
 
 # ─────────────────────────────────────────────
@@ -36,7 +37,7 @@ N, T, C, H, W = 12, 9, 3, 224, 224
 @pytest.fixture(scope="module")
 def model() -> HierarchicalGroupActivityModel:
     return HierarchicalGroupActivityModel(
-        cnn_output_size = CNN_DIM,
+        feature_extractor = build_alexnet_fc7,
         lstm_hidden_p   = LSTM_HIDDEN_P,
         lstm_hidden_g   = LSTM_HIDDEN_G,
         person_classes  = PERSON_CLS,
@@ -80,10 +81,11 @@ class TestHierarchicalShapes:
             assert group_logits.shape  == (GROUP_CLS,)
             assert person_logits.shape == (n, PERSON_CLS)
 
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     @pytest.mark.parametrize("n_sub", [1, 2, 4])
-    def test_subgroup_variants(self, n_sub):
+    def test_subgroup_variants(self, feature_extractor, n_sub):
         m = HierarchicalGroupActivityModel(
-            cnn_output_size = CNN_DIM,
+            feature_extractor = feature_extractor,
             lstm_hidden_p   = LSTM_HIDDEN_P,
             lstm_hidden_g   = LSTM_HIDDEN_G,
             n_subgroups     = n_sub,
@@ -93,10 +95,11 @@ class TestHierarchicalShapes:
         assert group_logits.shape  == (GROUP_CLS,)
         assert person_logits.shape == (12, PERSON_CLS)
 
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     @pytest.mark.parametrize("pool", ["max", "avg"])
-    def test_pool_variants(self, pool):
+    def test_pool_variants(self, feature_extractor, pool):
         m = HierarchicalGroupActivityModel(
-            cnn_output_size = CNN_DIM,
+            feature_extractor = build_alexnet_fc7,
             lstm_hidden_p   = LSTM_HIDDEN_P,
             lstm_hidden_g   = LSTM_HIDDEN_G,
             pool            = pool,
@@ -141,10 +144,11 @@ class TestHierarchicalValues:
 
 class TestHierarchicalGradients:
 
-    def test_group_loss_grad_reaches_lstm2(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_group_loss_grad_reaches_lstm2(self, feature_extractor):
         """Group-activity loss must flow back to LSTM2 (group_lstm) weights."""
         m = HierarchicalGroupActivityModel(
-            CNN_DIM, LSTM_HIDDEN_P, LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
         group_logits, _ = m(torch.randn(N, T, C, H, W))
         group_logits.sum().backward()
@@ -154,10 +158,11 @@ class TestHierarchicalGradients:
                 f"No gradient reached group_lstm param '{name}'"
             )
 
-    def test_person_loss_grad_reaches_lstm1(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_person_loss_grad_reaches_lstm1(self, feature_extractor):
         """Person-action loss must flow back to LSTM1 (person_embedder.lstm)."""
         m = HierarchicalGroupActivityModel(
-            CNN_DIM, LSTM_HIDDEN_P, LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
         _, person_logits = m(torch.randn(N, T, C, H, W))
         person_logits.sum().backward()
@@ -167,10 +172,11 @@ class TestHierarchicalGradients:
                 f"No gradient reached person lstm param '{name}'"
             )
 
-    def test_stage2_freeze_blocks_person_embedder_grad(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_stage2_freeze_blocks_person_embedder_grad(self, feature_extractor):
         """After freezing person_embedder, group loss must NOT update its weights."""
         m = HierarchicalGroupActivityModel(
-            CNN_DIM, LSTM_HIDDEN_P, LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
 
         # Simulate stage-2 freeze (as done in train.py)
@@ -185,10 +191,11 @@ class TestHierarchicalGradients:
                 f"Gradient leaked into frozen person_embedder param '{name}'"
             )
 
-    def test_stage2_freeze_still_trains_lstm2(self):
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_stage2_freeze_still_trains_lstm2(self, feature_extractor):
         """After freezing person_embedder, LSTM2 must still receive gradients."""
         m = HierarchicalGroupActivityModel(
-            CNN_DIM, LSTM_HIDDEN_P, LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
         for param in m.person_embedder.parameters():
             param.requires_grad = False

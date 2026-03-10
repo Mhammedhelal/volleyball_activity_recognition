@@ -1,9 +1,12 @@
+from typing import Callable
+
 import torch
 import torch.nn as nn
 
-from .person_embedder import PersonEmbedder, PERSON_ACTIONS
-from .subgroup_pooler import SubGroupPooler, make_subgroup_indices
-from .frame_descriptor import FrameDescriptor, GROUP_ACTIVITIES
+from src.models.person_embedder import PersonEmbedder, PERSON_ACTIONS, build_alexnet_fc7
+from src.models.subgroup_pooler import SubGroupPooler
+from src.utils.subgroups import make_subgroup_indices
+from src.models.frame_descriptor import FrameDescriptor, GROUP_ACTIVITIES
 
 
 class HierarchicalGroupActivityModel(nn.Module):
@@ -35,7 +38,7 @@ class HierarchicalGroupActivityModel(nn.Module):
 
     def __init__(
         self,
-        cnn_output_size: int = 4096,   # AlexNet fc7
+        feature_extractor: Callable[[], tuple[nn.Module, int]] = build_alexnet_fc7,    # CNN backbone function
         lstm_hidden_p:   int = 3000,    # LSTM1 hidden size
         lstm_hidden_g:   int = 2000,    # LSTM2 hidden size
         person_classes:  int = len(PERSON_ACTIONS),    # 9
@@ -48,15 +51,15 @@ class HierarchicalGroupActivityModel(nn.Module):
         super().__init__()
         self.n_subgroups = n_subgroups
 
-        embed_dim = cnn_output_size + lstm_hidden_p   # D+H per person
-        z_dim     = embed_dim * n_subgroups           # Z_t dimension
-
         self.person_embedder  = PersonEmbedder(
-            cnn_output_size = cnn_output_size,
+            feature_extractor = feature_extractor,
             lstm_hidden     = lstm_hidden_p,
             person_classes  = person_classes,
             n_layers        = n_layers_p,
         )
+        embed_dim = self.person_embedder.cnn_dim + lstm_hidden_p   # D+H per person
+        z_dim     = embed_dim * n_subgroups           # Z_t dimension
+
         self.subgroup_pooler  = SubGroupPooler(pool=pool)
         self.frame_descriptor = FrameDescriptor(
             z_dim         = z_dim,
@@ -95,26 +98,3 @@ class HierarchicalGroupActivityModel(nn.Module):
 
         return group_logits, person_logits
 
-
-# ─────────────────────────────────────────────
-# Smoke test
-# ─────────────────────────────────────────────
-if __name__ == "__main__":
-    # Use config defaults for smoke test sizes
-    from ..config import NUM_PLAYERS, NUM_FRAMES, INPUT_SIZE
-
-    N = NUM_PLAYERS
-    T = NUM_FRAMES
-    C = 3
-    H, W = INPUT_SIZE
-
-    model = HierarchicalGroupActivityModel()
-
-    x = torch.randn(N, T, C, H, W)
-    group_logits, person_logits = model(x)
-
-    print(f"group_logits  : {group_logits.shape}")    # [8]
-    print(f"person_logits : {person_logits.shape}")   # [N, 9]
-    assert group_logits.shape  == (8,),    f"Bad group shape:  {group_logits.shape}"
-    assert person_logits.shape == (N, 9),  f"Bad person shape: {person_logits.shape}"
-    print("All assertions passed.")

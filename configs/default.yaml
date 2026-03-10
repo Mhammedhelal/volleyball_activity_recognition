@@ -7,7 +7,7 @@
 # Paths
 # ---------------------------------------------------------------------------
 paths:
-  data_root: "data/volleyball"
+  data_root: "data/videos_g10"
   output_dir: "outputs"
   checkpoint_dir: "outputs/checkpoints"
   log_dir: "outputs/logs"
@@ -40,14 +40,14 @@ dataset:
 # ---------------------------------------------------------------------------
 labels:
   group_activities:
-    - "r_set"
     - "r_spike"
-    - "r_pass"
+    - "r_set"
+    - "l-spike"
+    - "l_set"
+    - "r-pass"
+    - "l-pass"
     - "r_winpoint"
     - "l_winpoint"
-    - "l_pass"
-    - "l_spike"
-    - "l_set"
   num_group_classes: 8
 
   person_actions:
@@ -66,7 +66,7 @@ labels:
 # CNN Backbone
 # ---------------------------------------------------------------------------
 cnn:
-  backbone: "alexnet"
+  backbone: "alexnet" # resnet50, alexnet, mobilenet_v3_large
   feature_layer: "fc7"
   feature_dim: 4096
   pretrained: true

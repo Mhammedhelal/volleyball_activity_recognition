@@ -1,6 +1,6 @@
 from pathlib import Path
 import sys
-
+from typing import Callable
 import torch
 import torch.nn as nn
 from torchvision import models
@@ -11,7 +11,7 @@ PERSON_ACTIONS = [
 ]  # 9 classes
 
 
-def build_alexnet_fc7() -> tuple[nn.Module, int]:
+def build_alexnet_fc7(freeze: bool = True) -> tuple[nn.Module, int]:
     """
     Returns (model, output_dim=4096).
     Frozen AlexNet up to and including fc7 (classifier[5] = second ReLU).
@@ -32,9 +32,49 @@ def build_alexnet_fc7() -> tuple[nn.Module, int]:
         nn.Flatten(),
         *list(alexnet.classifier.children())[:6],
     )
-    for p in feature_extractor.parameters():
-        p.requires_grad = False
+    if freeze:
+        for p in feature_extractor.parameters():
+            p.requires_grad = False
+
+    feature_extractor.eval()
+
     return feature_extractor, 4096
+
+def build_resnet50(freeze: bool = True) -> tuple[nn.Module, int]:
+    resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+
+    backbone = nn.Sequential(
+        *list(resnet.children())[:-1],
+        nn.Flatten()
+    )
+
+    if freeze:
+        for p in backbone.parameters():
+            p.requires_grad = False
+
+    backbone.eval()
+
+    return backbone, 2048
+
+def build_mobilenet_v3_large(freeze: bool = True) -> tuple[nn.Module, int]:
+
+    mobilenet = models.mobilenet_v3_large(
+        weights=models.MobileNet_V3_Large_Weights.DEFAULT
+    )
+
+    backbone = nn.Sequential(
+        mobilenet.features,
+        mobilenet.avgpool,
+        nn.Flatten()
+    )
+
+    if freeze:
+        for p in backbone.parameters():
+            p.requires_grad = False
+
+    backbone.eval()
+
+    return backbone, 960  
 
 
 class PersonEmbedder(nn.Module):
@@ -59,26 +99,24 @@ class PersonEmbedder(nn.Module):
 
     def __init__(
         self,
-        cnn_output_size: int = 4096,
+        feature_extractor: Callable[[], tuple[nn.Module, int]] = build_alexnet_fc7,          
         lstm_hidden:     int = 512,
         person_classes:  int = len(PERSON_ACTIONS),
         n_layers:        int = 1,
     ):
         super().__init__()
-        self.cnn, cnn_out_dim = build_alexnet_fc7()
-        assert cnn_out_dim == cnn_output_size, (
-            f"CNN output {cnn_out_dim} != declared cnn_output_size {cnn_output_size}"
-        )
+        self.cnn, cnn_out_dim = feature_extractor()
+
 
         self.lstm = nn.LSTM(
-            input_size  = cnn_output_size,
+            input_size  = cnn_out_dim,
             hidden_size = lstm_hidden,
             num_layers  = n_layers,
             batch_first = True,
         )
-        self.person_fc = nn.Linear(cnn_output_size + lstm_hidden, person_classes)
+        self.person_fc = nn.Linear(cnn_out_dim + lstm_hidden, person_classes)
 
-        self.cnn_dim     = cnn_output_size
+        self.cnn_dim     = cnn_out_dim
         self.hidden_size = lstm_hidden
         self.n_layers    = n_layers
 
@@ -93,9 +131,7 @@ class PersonEmbedder(nn.Module):
         cnn_out = cnn_out.view(N, T, self.cnn_dim)    # [N,   T, D]
 
         # LSTM1 — one person sequence at a time (shared weights across persons)
-        h0 = torch.zeros(self.n_layers, N, self.hidden_size, device=x.device)
-        c0 = torch.zeros(self.n_layers, N, self.hidden_size, device=x.device)
-        lstm_out, _ = self.lstm(cnn_out, (h0, c0))   # [N, T, H]
+        lstm_out, _ = self.lstm(cnn_out)   # [N, T, H]
 
         # P_{t,k} = x_{t,k} ⊕ h_{t,k}  at every t  (Eq. 7)
         P = torch.cat([cnn_out, lstm_out], dim=-1)    # [N, T, D+H]
