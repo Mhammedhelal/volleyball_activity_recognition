@@ -53,6 +53,55 @@ from src.utils.checkpointing import save_checkpoint
 # ---------------------------------------------
 # Helpers
 # ---------------------------------------------
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def resolve_videos(data_root: Path, requested: list[int], split_name: str) -> list[int]:
+    """
+    Return the subset of `requested` video IDs that actually exist on disk
+    (i.e. {data_root}/{id}/annotations.txt is present).
+
+    Prints a clear summary so the user knows what was found vs. missing.
+    Falls back to ALL discovered videos (with annotations) when none of the
+    requested IDs are found — useful when you only have a small subset of the
+    full dataset.
+    """
+    # Discover every numeric subdirectory that has annotations.txt
+    available: set[int] = set()
+    if data_root.is_dir():
+        for subdir in sorted(data_root.iterdir()):
+            if subdir.is_dir() and subdir.name.isdigit():
+                if (subdir / "annotations.txt").exists():
+                    available.add(int(subdir.name))
+
+    if not available:
+        raise FileNotFoundError(
+            f"No video folders with annotations.txt found under: {data_root}\n"
+            f"Expected structure: {data_root}/<video_id>/annotations.txt"
+        )
+
+    requested_set = set(requested)
+    matched       = sorted(available & requested_set)
+    missing       = sorted(requested_set - available)
+    extra         = sorted(available - requested_set)
+
+    print(f"\n── {split_name} videos ──────────────────────────────")
+    print(f"  Requested in config : {sorted(requested_set)}")
+    print(f"  Found on disk       : {sorted(available)}")
+    if matched:
+        print(f"  ✔ Using            : {matched}")
+    if missing:
+        print(f"  ✘ Missing (skipped): {missing}")
+    if extra:
+        print(f"  ℹ  Extra on disk   : {extra}  (not in this split)")
+
+    if not matched:
+        print(f"\n  ⚠  None of the {split_name} IDs exist on disk.")
+        print(f"     Falling back to ALL available: {sorted(available)}")
+        matched = sorted(available)
+
+    print()
+    return matched
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -297,9 +346,16 @@ def main() -> None:
     ckpt_dir = Path("outputs/checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── resolve which video IDs actually exist on disk ────────────────────
+    data_root = Path(cfg.paths.data_root)
+    if not data_root.is_absolute():
+        data_root = Path(__file__).resolve().parent.parent / data_root
+
+    train_videos = resolve_videos(data_root, cfg.dataset.train_videos, "TRAIN")
+
     # ── data loaders ──────────────────────────────────────────────────────
     train_loader = build_loader(
-        cfg, cfg.dataset.train_videos, train_transforms,
+        cfg, train_videos, train_transforms,
         shuffle=True, batch_size=cfg.training.stage1.batch_size,
     )
 

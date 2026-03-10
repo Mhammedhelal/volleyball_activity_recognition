@@ -36,6 +36,54 @@ from src.models.baselines import BASELINES
 # ---------------------------------------------
 # Helpers
 # ---------------------------------------------
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def resolve_videos(data_root: Path, requested: list[int], split_name: str) -> list[int]:
+    """
+    Return the subset of `requested` video IDs that actually exist on disk
+    (i.e. {data_root}/{id}/annotations.txt is present).
+
+    Prints a clear summary so the user knows what was found vs. missing.
+    Falls back to ALL discovered videos (with annotations) when none of the
+    requested IDs are found — useful when you only have a small subset of the
+    full dataset.
+    """
+    # Discover every numeric subdirectory that has annotations.txt
+    available: set[int] = set()
+    if data_root.is_dir():
+        for subdir in sorted(data_root.iterdir()):
+            if subdir.is_dir() and subdir.name.isdigit():
+                if (subdir / "annotations.txt").exists():
+                    available.add(int(subdir.name))
+
+    if not available:
+        raise FileNotFoundError(
+            f"No video folders with annotations.txt found under: {data_root}\n"
+            f"Expected structure: {data_root}/<video_id>/annotations.txt"
+        )
+
+    requested_set = set(requested)
+    matched       = sorted(available & requested_set)
+    missing       = sorted(requested_set - available)
+    extra         = sorted(available - requested_set)
+
+    print(f"\n── {split_name} videos ──────────────────────────────")
+    print(f"  Requested in config : {sorted(requested_set)}")
+    print(f"  Found on disk       : {sorted(available)}")
+    if matched:
+        print(f"  ✔ Using            : {matched}")
+    if missing:
+        print(f"  ✘ Missing (skipped): {missing}")
+    if extra:
+        print(f"  ℹ  Extra on disk   : {extra}  (not in this split)")
+
+    if not matched:
+        print(f"\n  ⚠  None of the {split_name} IDs exist on disk.")
+        print(f"     Falling back to ALL available: {sorted(available)}")
+        matched = sorted(available)
+
+    print()
+    return matched
 
 def build_full_model(cfg: Config) -> HierarchicalGroupActivityModel:
     backbone_map = {
@@ -180,13 +228,15 @@ def main() -> None:
     print(f"Loaded checkpoint: {ckpt_path}")
 
     # ── data ──────────────────────────────────────────────────────────────
-    videos = (
-        cfg.dataset.val_videos
-        if args.split == "val"
-        else cfg.dataset.test_videos
-    )
-    loader = build_loader(cfg, videos, batch_size=cfg.evaluation.batch_size)
-    print(f"Evaluating on '{args.split}' split  ({len(videos)} videos)")
+    # ── resolve which video IDs actually exist on disk ────────────────────
+    data_root = Path(cfg.paths.data_root)
+    if not data_root.is_absolute():
+        data_root = Path(__file__).resolve().parent.parent / data_root
+
+    raw_videos = cfg.dataset.val_videos if args.split == "val" else cfg.dataset.test_videos
+    videos     = resolve_videos(data_root, raw_videos, args.split.upper())
+
+    loader = build_loader(cfg, videos, cfg.training.stage1.batch_size)
 
     # ── evaluate ──────────────────────────────────────────────────────────
     evaluator = Evaluator(model, loader, cfg, device=device)
