@@ -26,6 +26,11 @@ GROUP_CLASSES = 8
 T             = 9
 
 
+def make_Z(t: int = T) -> torch.Tensor:
+    """Synthetic frame descriptor sequence [1, T, z_dim]."""
+    return torch.randn(1, t, Z_DIM)
+
+
 @pytest.fixture(scope="module")
 def descriptor() -> FrameDescriptor:
     return FrameDescriptor(
@@ -34,11 +39,6 @@ def descriptor() -> FrameDescriptor:
         group_classes = GROUP_CLASSES,
         n_layers      = 1,
     )
-
-
-def make_Z(t: int = T) -> torch.Tensor:
-    """Synthetic frame descriptor sequence [1, T, z_dim]."""
-    return torch.randn(1, t, Z_DIM)
 
 
 # ─────────────────────────────────────────────

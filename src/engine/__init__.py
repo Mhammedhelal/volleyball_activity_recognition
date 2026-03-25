@@ -1,7 +1,16 @@
 """Engine subpackage.
 
-This package contains training, evaluation and loss utilities. Import
-individual modules from `src.engine` (e.g. `src.engine.trainer`).
+Training, evaluation, and loss utilities.
+
+Modules:
+  - trainer.py: Training loop implementation
+  - evaluator.py: Model evaluation and metrics
+  - (losses defined inline or in separate loss modules)
+
+Usage:
+    from src.engine.trainer import train_epoch
+    from src.engine.evaluator import evaluate_model
 """
 
 __all__ = []
+

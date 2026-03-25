@@ -19,7 +19,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.models.hierarchical_model import HierarchicalGroupActivityModel
-from src.models.person_embedder import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
+from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 
 
 # ─────────────────────────────────────────────

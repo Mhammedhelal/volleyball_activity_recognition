@@ -90,8 +90,8 @@ class Trainer:
         self.criterion_players = nn.CrossEntropyLoss()
 
         self.loss_meter     = AverageMeter(name="loss")
-        self.group_tracker  = MetricsTracker(len(GROUP_ACTIVITIES), GROUP_ACTIVITIES)
-        self.person_tracker = MetricsTracker(len(PERSON_ACTIONS),   PERSON_ACTIONS)
+        self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
+        self.person_tracker = MetricsTracker(PERSON_ACTIONS, len(PERSON_ACTIONS))
 
     # ─────────────────────────────────────────────────────────────────────────
 

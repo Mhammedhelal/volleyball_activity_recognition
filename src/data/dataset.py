@@ -5,6 +5,7 @@ PyTorch Dataset for volleyball activity recognition.
 
 __getitem__ returns a 4-tuple:
     crops        [N, T, C, H, W]  – per-person temporal crops  (used by B2/B3/B5/B6/B7 + full model)
+    -or-
     full_frame   [T, C, H, W]     – full-frame temporal sequence (used by B1/B4)
     group_label  [1]              – team activity class index
     person_labels[N]              – individual action class indices
@@ -29,6 +30,7 @@ class VolleyballDataset(Dataset):
         cfg:          Config,
         transforms=None,
         T:            int = 9,
+        crops_data=True
     ):
         assert T % 2 == 1, f"T must be odd for a symmetric window, got {T}"
 
@@ -37,6 +39,7 @@ class VolleyballDataset(Dataset):
         self.transforms = transforms
         self.T          = T
         self.half       = T // 2
+        self.crops_data = crops_data
 
         self.samples = []   # list of (video_id, annotation_dict)
 
@@ -73,49 +76,59 @@ class VolleyballDataset(Dataset):
 
         assert len(players) > 0, f"Sample must have at least 1 player"
 
+        if self.crops_data:
         # ── person crops: [N, T, C, H, W] ────────────────────────────────────
-        person_crops = []
-        for p in players:
-            x, y, w, h = p["bbox"]
-            t_crops = []
-            for fid in frame_ids:
-                img    = frames_pil[fid]
-                iw, ih = img.size
-                x1 = max(0, x);       y1 = max(0, y)
-                x2 = min(iw, x + w);  y2 = min(ih, y + h)
-                if x2 <= x1 or y2 <= y1:
-                    x1, y1 = 0, 0
-                    x2, y2 = min(1, iw), min(1, ih)
-                crop = img.crop((x1, y1, x2, y2))
-                if self.transforms:
-                    crop = self.transforms(crop)        # [C, H, W]
-                t_crops.append(crop)
-            person_crops.append(torch.stack(t_crops, dim=0))   # [T, C, H, W]
+            person_crops = []
+            for p in players:
+                x, y, w, h = p["bbox"]
+                t_crops = []
+                for fid in frame_ids:
+                    img    = frames_pil[fid]
+                    iw, ih = img.size
+                    x1 = max(0, x);       y1 = max(0, y)
+                    x2 = min(iw, x + w);  y2 = min(ih, y + h)
+                    if x2 <= x1 or y2 <= y1:
+                        x1, y1 = 0, 0
+                        x2, y2 = min(1, iw), min(1, ih)
+                    crop = img.crop((x1, y1, x2, y2))
+                    if self.transforms:
+                        crop = self.transforms(crop)        # [C, H, W]
+                    t_crops.append(crop)
+                person_crops.append(torch.stack(t_crops, dim=0))   # [T, C, H, W]
 
-        crops = torch.stack(person_crops, dim=0)        # [N, T, C, H, W]
+            crops = torch.stack(person_crops, dim=0)        # [N, T, C, H, W]
 
+            x = crops
+
+        else:
         # ── full frames: [T, C, H, W] ─────────────────────────────────────────
         # Used by frame-level baselines (B1, B4).  We apply the same transforms
         # as for crops so the backbone sees the same normalisation.
-        full_frames = []
-        for fid in frame_ids:
-            img = frames_pil[fid]
-            if self.transforms:
-                img = self.transforms(img)              # [C, H, W]
-            full_frames.append(img)
-        full_frame = torch.stack(full_frames, dim=0)    # [T, C, H, W]
+            full_frames = []
+            for fid in frame_ids:
+                img = frames_pil[fid]
+                if self.transforms:
+                    img = self.transforms(img)              # [C, H, W]
+                full_frames.append(img)
+            full_frame = torch.stack(full_frames, dim=0)    # [T, C, H, W]
+            x = full_frame
 
         # ── labels ────────────────────────────────────────────────────────────
         person_labels = torch.tensor(
             [p["action_id"] for p in players], dtype=torch.long
         )                                               # [N]
 
+        if self.crops_data: 
+            assert x.shape[0] == len(person_labels), "Mismatch: N players"
+            assert x.shape[1] == self.T,             "Mismatch: temporal window"
+        else:
+            assert x.shape[0] == self.T,             "Mismatch: temporal window"
         group_label_tensor = torch.tensor([group_label], dtype=torch.long)  # [1]
 
-        assert crops.shape[0] == len(person_labels), "Mismatch: N players"
-        assert crops.shape[1] == self.T,             "Mismatch: temporal window"
+        
+        
 
-        return crops, full_frame, group_label_tensor, person_labels
+        return x, group_label_tensor, person_labels
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -168,12 +181,13 @@ class VolleyballDataset(Dataset):
         return Image.new("RGB", (224, 224), color=0)
 
 
-def volleyball_collate(batch: list) -> tuple:
+def volleyball_collate(batch: list, crops_data=True) -> tuple:
     """
     Custom collate for the Volleyball dataset.
 
     Each sample from VolleyballDataset.__getitem__ is:
         crops         [N_i, T, C, H, W]   person crops
+        -or-
         full_frame    [T, C, H, W]         full-frame sequence
         group_label   [1]                  team activity class index
         person_labels [N_i]                individual action class indices
@@ -181,13 +195,13 @@ def volleyball_collate(batch: list) -> tuple:
     Returns
     -------
     crops_list         : list[B] of [N_i, T, C, H, W]   variable N — kept as list
+    -or-
     full_frames        : FloatTensor [B, T, C, H, W]     fixed shape — stacked
     group_labels       : LongTensor  [B]
     person_labels_list : list[B] of [N_i]                variable N — kept as list
     """
-    crops_list         = [s[0] for s in batch]
-    full_frames        = torch.stack([s[1] for s in batch], dim=0)     # [B, T, C, H, W]
-    group_labels       = torch.cat([s[2] for s in batch], dim=0)       # [B]
-    person_labels_list = [s[3] for s in batch]
+    x         = [s[0] for s in batch]  if crops_data else torch.stack([s[0] for s in batch], dim=0)
+    group_labels       = torch.cat([s[1] for s in batch], dim=0)       # [B]
+    person_labels_list = [s[2] for s in batch]
 
-    return crops_list, full_frames, group_labels, person_labels_list
+    return x, group_labels, person_labels_list

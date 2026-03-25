@@ -11,7 +11,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.models.person_embedder import PersonEmbedder, build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
+from src.models.person_embedder import PersonEmbedder
+from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
+
+
 
 
 # ─────────────────────────────────────────────

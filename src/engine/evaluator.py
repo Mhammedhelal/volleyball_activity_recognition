@@ -36,8 +36,8 @@ class Evaluator:
         self.input_type      = getattr(model, "INPUT_TYPE",      _DEFAULT_INPUT_TYPE)
         self.has_person_loss = getattr(model, "HAS_PERSON_LOSS", _DEFAULT_HAS_PERSON_LOSS)
 
-        self.group_tracker  = MetricsTracker(len(GROUP_ACTIVITIES), GROUP_ACTIVITIES)
-        self.person_tracker = MetricsTracker(len(PERSON_ACTIONS),   PERSON_ACTIONS)
+        self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
+        self.person_tracker = MetricsTracker(PERSON_ACTIONS, len(PERSON_ACTIONS))
 
     @torch.no_grad()
     def evaluate(self) -> dict:

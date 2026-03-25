@@ -42,10 +42,10 @@ labels:
   group_activities:
     - "r_spike"
     - "r_set"
-    - "l-spike"
+    - "l_spike"
     - "l_set"
-    - "r-pass"
-    - "l-pass"
+    - "r_pass"
+    - "l_pass"
     - "r_winpoint"
     - "l_winpoint"
   num_group_classes: 8
@@ -169,18 +169,3 @@ evaluation:
     - "confusion_matrix"
     - "per_class_accuracy"
   checkpoint: "best"
-
-# ---------------------------------------------------------------------------
-# Testing
-# Maps each test file name to a human-readable description of the
-# module / class it exercises. Used by scripts/run_tests.py.
-# Add or remove entries here whenever test files are added or removed.
-# ---------------------------------------------------------------------------
-testing:
-  tests_dir: "tests"
-  module_under_test:
-    test_dataset.py:          "VolleyballDataset / volleyball_collate"
-    test_person_embedder.py:  "PersonEmbedder"
-    test_subgroup_pooler.py:  "SubGroupPooler / make_subgroup_indices"
-    test_frame_descriptor.py: "FrameDescriptor"
-    test_hierarchical.py:     "HierarchicalGroupActivityModel"
