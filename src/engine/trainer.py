@@ -7,7 +7,7 @@ Routing logic
 -------------
 The trainer inspects two class-level flags on the model:
 
-    model.INPUT_TYPE      "frame"  → feed full_frames  [T, C, H, W]  per sample
+    model.INPUT_TYPE      "frame"  → feed full frames  [T, C, H, W]  per sample
                           "crops"  → feed crops         [N, T, C, H, W]  per sample
 
     model.HAS_PERSON_LOSS True  → model returns (group_logits, person_logits)
@@ -20,6 +20,20 @@ The full HierarchicalGroupActivityModel always has:
     HAS_PERSON_LOSS = True
 
 All baselines have HAS_PERSON_LOSS = False.
+
+DataLoader collate format
+-------------------------
+volleyball_collate now returns a **3-tuple**:
+
+    crops_data=True  (INPUT_TYPE == "crops")
+        x_batch            : list[B] of Tensor [N_i, T, C, H, W]
+        group_labels       : LongTensor [B]
+        person_labels_list : list[B] of LongTensor [N_i]
+
+    crops_data=False  (INPUT_TYPE == "frame")
+        x_batch            : Tensor [B, T, C, H, W]
+        group_labels       : LongTensor [B]
+        person_labels_list : list[B] of LongTensor [N_i]
 """
 
 import torch
@@ -29,8 +43,7 @@ from typing import Iterable
 from src.utils.metrics import AverageMeter, MetricsTracker
 from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
 
-# Sentinel values for models that don't declare the flags
-# (keeps backwards-compatibility with the full hierarchical model)
+# Sentinel defaults (backwards-compat with full hierarchical model)
 _DEFAULT_INPUT_TYPE      = "crops"
 _DEFAULT_HAS_PERSON_LOSS = True
 
@@ -39,21 +52,15 @@ class Trainer:
     """
     Unified trainer for hierarchical model and all baseline models.
 
-    DataLoader must use volleyball_collate, which now yields 4-tuples:
-        crops_list         : list[B] of [N_i, T, C, H, W]
-        full_frames        : [B, T, C, H, W]
-        group_labels       : [B]
-        person_labels_list : list[B] of [N_i]
-
     Args:
         model          : HierarchicalGroupActivityModel or any BaselineModel
         params         : parameters the optimizer should update
-        train_loader   : DataLoader using volleyball_collate
+        train_loader   : DataLoader using make_collate_fn(crops_data=...)
         device         : "cuda" or "cpu"
         learning_rate  : default 1e-5 (paper value)
         momentum       : default 0.9  (paper value)
         num_epochs     : total training epochs
-        person_loss_w  : weight of auxiliary person-action loss (ignored for baselines)
+        person_loss_w  : weight of auxiliary person-action loss
         log_every      : print summary every N epochs
     """
 
@@ -76,9 +83,12 @@ class Trainer:
         self.person_loss_w  = person_loss_w
         self.log_every      = log_every
 
-        # Read routing flags with safe defaults for the full hierarchical model
+        # Read routing flags with safe defaults
         self.input_type      = getattr(model, "INPUT_TYPE",      _DEFAULT_INPUT_TYPE)
         self.has_person_loss = getattr(model, "HAS_PERSON_LOSS", _DEFAULT_HAS_PERSON_LOSS)
+
+        # crops_data mirrors input_type: frame-level models use stacked full frames
+        self.crops_data = (self.input_type != "frame")
 
         self.optimizer = torch.optim.SGD(
             params,
@@ -93,47 +103,40 @@ class Trainer:
         self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
         self.person_tracker = MetricsTracker(PERSON_ACTIONS, len(PERSON_ACTIONS))
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def _forward_sample(
         self,
-        crops:         torch.Tensor,    # [N, T, C, H, W]
-        full_frame:    torch.Tensor,    # [T, C, H, W]
-        group_label:   torch.Tensor,    # scalar or [1]
-        person_labels: torch.Tensor,    # [N]
+        x:             torch.Tensor,   # [N, T, C, H, W]  OR  [T, C, H, W]
+        group_label:   torch.Tensor,   # scalar or [1]
+        person_labels: torch.Tensor,   # [N]
     ) -> torch.Tensor:
         """
         Run one sample forward, compute loss, update trackers.
-        Returns the scalar loss for this sample (not yet divided by batch size).
+        Returns the scalar loss for this sample.
         """
-        # ── select input tensor ───────────────────────────────────────────────
-        if self.input_type == "frame":
-            x = full_frame                      # [T, C, H, W]
-        else:
-            x = crops                           # [N, T, C, H, W]
-
-        # ── forward pass ──────────────────────────────────────────────────────
+        # ── forward pass ──────────────────────────────────────────────────
         if self.has_person_loss:
             group_logits, person_logits = self.model(x)
         else:
-            group_logits = self.model(x)
+            group_logits  = self.model(x)
             person_logits = None
 
-        # ── group loss ────────────────────────────────────────────────────────
+        # ── group loss ────────────────────────────────────────────────────
         g_label = group_label.view(1) if group_label.dim() == 0 else group_label
         loss = self.criterion_group(
-            group_logits.unsqueeze(0),  # [1, C]
-            g_label,                    # [1]
+            group_logits.unsqueeze(0),   # [1, C]
+            g_label,                     # [1]
         )
 
-        # ── optional person loss ──────────────────────────────────────────────
+        # ── optional person loss ──────────────────────────────────────────
         if self.has_person_loss and person_logits is not None:
             loss = loss + self.person_loss_w * self.criterion_players(
                 person_logits,   # [N, P]
                 person_labels,   # [N]
             )
 
-        # ── update trackers (no grad) ─────────────────────────────────────────
+        # ── update trackers (no grad) ─────────────────────────────────────
         with torch.no_grad():
             self.group_tracker.update(
                 preds   = group_logits.argmax().unsqueeze(0),
@@ -147,7 +150,7 @@ class Trainer:
 
         return loss
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
 
     def train_epoch(self) -> dict:
         """Run one full pass over the training set."""
@@ -157,34 +160,44 @@ class Trainer:
         self.person_tracker.reset()
 
         for batch in self.train_loader:
-            crops_list, full_frames, group_labels, person_labels_list = batch
+            # 3-tuple from volleyball_collate
+            x_batch, group_labels, person_labels_list = batch
 
-            full_frames  = full_frames.to(self.device)   # [B, T, C, H, W]
-            group_labels = group_labels.to(self.device)  # [B]
+            group_labels = group_labels.to(self.device)   # [B]
+            batch_loss   = torch.tensor(0.0, device=self.device)
 
-            batch_loss = torch.tensor(0.0, device=self.device)
+            if self.crops_data:
+                # x_batch is list[B] of [N_i, T, C, H, W]
+                batch_size = len(x_batch)
+                for i, (crops, person_labels) in enumerate(
+                    zip(x_batch, person_labels_list)
+                ):
+                    crops         = crops.to(self.device)
+                    person_labels = person_labels.to(self.device)
+                    batch_loss    = batch_loss + self._forward_sample(
+                        x             = crops,
+                        group_label   = group_labels[i],
+                        person_labels = person_labels,
+                    )
+            else:
+                # x_batch is Tensor [B, T, C, H, W]
+                x_batch    = x_batch.to(self.device)
+                batch_size = x_batch.shape[0]
+                for i, person_labels in enumerate(person_labels_list):
+                    person_labels = person_labels.to(self.device)
+                    batch_loss    = batch_loss + self._forward_sample(
+                        x             = x_batch[i],   # [T, C, H, W]
+                        group_label   = group_labels[i],
+                        person_labels = person_labels,
+                    )
 
-            for i, (crops, person_labels) in enumerate(
-                zip(crops_list, person_labels_list)
-            ):
-                crops         = crops.to(self.device)           # [N_i, T, C, H, W]
-                person_labels = person_labels.to(self.device)   # [N_i]
-                frame_i       = full_frames[i]                  # [T, C, H, W]
-
-                batch_loss = batch_loss + self._forward_sample(
-                    crops         = crops,
-                    full_frame    = frame_i,
-                    group_label   = group_labels[i],
-                    person_labels = person_labels,
-                )
-
-            batch_loss = batch_loss / len(crops_list)
+            batch_loss = batch_loss / batch_size
 
             self.optimizer.zero_grad()
             batch_loss.backward()
             self.optimizer.step()
 
-            self.loss_meter.update(batch_loss.item(), n=len(crops_list))
+            self.loss_meter.update(batch_loss.item(), n=batch_size)
 
         return {
             "loss":            self.loss_meter.avg,

@@ -3,8 +3,19 @@ src/engine/evaluator.py
 ------------------------
 Evaluator for both the hierarchical model and all baseline models.
 
-Uses the same INPUT_TYPE / HAS_PERSON_LOSS flags as trainer.py —
-see trainer.py docstring for routing details.
+Uses the same INPUT_TYPE / HAS_PERSON_LOSS flags as trainer.py.
+
+DataLoader collate format (3-tuple from volleyball_collate):
+
+    crops_data=True  (INPUT_TYPE == "crops")
+        x_batch            : list[B] of Tensor [N_i, T, C, H, W]
+        group_labels       : LongTensor [B]
+        person_labels_list : list[B] of LongTensor [N_i]
+
+    crops_data=False  (INPUT_TYPE == "frame")
+        x_batch            : Tensor [B, T, C, H, W]
+        group_labels       : LongTensor [B]
+        person_labels_list : list[B] of LongTensor [N_i]
 """
 
 import torch
@@ -22,7 +33,7 @@ class Evaluator:
 
     Args:
         model      : HierarchicalGroupActivityModel or any BaselineModel
-        val_loader : DataLoader using volleyball_collate (4-tuple)
+        val_loader : DataLoader using make_collate_fn(crops_data=...)
         cfg        : Config  (passed through for report formatting)
         device     : "cuda" or "cpu"
     """
@@ -36,8 +47,11 @@ class Evaluator:
         self.input_type      = getattr(model, "INPUT_TYPE",      _DEFAULT_INPUT_TYPE)
         self.has_person_loss = getattr(model, "HAS_PERSON_LOSS", _DEFAULT_HAS_PERSON_LOSS)
 
+        # crops_data mirrors input_type
+        self.crops_data = (self.input_type != "frame")
+
         self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
-        self.person_tracker = MetricsTracker(PERSON_ACTIONS, len(PERSON_ACTIONS))
+        self.person_tracker = MetricsTracker(PERSON_ACTIONS,   len(PERSON_ACTIONS))
 
     @torch.no_grad()
     def evaluate(self) -> dict:
@@ -47,38 +61,25 @@ class Evaluator:
         self.person_tracker.reset()
 
         for batch in self.val_loader:
-            crops_list, full_frames, group_labels, person_labels_list = batch
+            # 3-tuple from volleyball_collate
+            x_batch, group_labels, person_labels_list = batch
 
-            full_frames  = full_frames.to(self.device)
-            group_labels = group_labels.to(self.device)
+            group_labels = group_labels.to(self.device)   # [B]
 
-            for i, (crops, person_labels) in enumerate(
-                zip(crops_list, person_labels_list)
-            ):
-                crops         = crops.to(self.device)
-                person_labels = person_labels.to(self.device)
-
-                # ── select input ─────────────────────────────────────────────
-                x = full_frames[i] if self.input_type == "frame" else crops
-
-                # ── forward ──────────────────────────────────────────────────
-                if self.has_person_loss:
-                    group_logits, person_logits = self.model(x)
-                else:
-                    group_logits  = self.model(x)
-                    person_logits = None
-
-                # ── update trackers ──────────────────────────────────────────
-                g_label = group_labels[i].view(1)
-                self.group_tracker.update(
-                    preds   = group_logits.argmax().unsqueeze(0),
-                    targets = g_label,
-                )
-                if self.has_person_loss and person_logits is not None:
-                    self.person_tracker.update(
-                        preds   = person_logits.argmax(dim=-1),
-                        targets = person_labels,
-                    )
+            if self.crops_data:
+                # x_batch is list[B] of [N_i, T, C, H, W]
+                for i, (crops, person_labels) in enumerate(
+                    zip(x_batch, person_labels_list)
+                ):
+                    crops         = crops.to(self.device)
+                    person_labels = person_labels.to(self.device)
+                    self._eval_sample(crops, group_labels[i], person_labels)
+            else:
+                # x_batch is Tensor [B, T, C, H, W]
+                x_batch = x_batch.to(self.device)
+                for i, person_labels in enumerate(person_labels_list):
+                    person_labels = person_labels.to(self.device)
+                    self._eval_sample(x_batch[i], group_labels[i], person_labels)
 
         group_summary  = self.group_tracker.summary()
         person_summary = self.person_tracker.summary()
@@ -95,6 +96,29 @@ class Evaluator:
             "group_confusion":  group_summary["confusion_matrix"],
             "person_confusion": person_summary["confusion_matrix"],
         }
+
+    def _eval_sample(
+        self,
+        x:             torch.Tensor,   # [N, T, C, H, W] or [T, C, H, W]
+        group_label:   torch.Tensor,   # scalar
+        person_labels: torch.Tensor,   # [N]
+    ) -> None:
+        if self.has_person_loss:
+            group_logits, person_logits = self.model(x)
+        else:
+            group_logits  = self.model(x)
+            person_logits = None
+
+        g_label = group_label.view(1)
+        self.group_tracker.update(
+            preds   = group_logits.argmax().unsqueeze(0),
+            targets = g_label,
+        )
+        if self.has_person_loss and person_logits is not None:
+            self.person_tracker.update(
+                preds   = person_logits.argmax(dim=-1),
+                targets = person_labels,
+            )
 
     def report(self) -> None:
         """Print a formatted evaluation report to stdout."""

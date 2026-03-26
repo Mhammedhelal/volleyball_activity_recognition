@@ -14,64 +14,47 @@ Usage
 
     # Standard overrides still apply
     python scripts/train.py --baseline B4 --lr 1e-4 --num_epochs 50 --device cuda
-
-    Video Data and Selection
-    ------------------------
-    The script expects video data organized in folders by video ID, each containing:
-    - A folder named with the video ID (e.g., '45', '46')
-    - Inside each video folder: an 'annotations.txt' file with frame annotations
-    - Frame images stored in subfolders or as individual files
-
-    Video selection:
-    - By default, uses video IDs specified in the config file (configs/default.yaml)
-    - With --data-root: auto-discovers all video IDs from subfolder names in the data directory
-    - Auto-split: 80% train, 10% val, 10% test (when using --data-root)
-    - Only videos with existing 'annotations.txt' are included
 """
 
 import argparse
-import random
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import Config
-from src.data.dataset import VolleyballDataset, volleyball_collate
-from src.data.transforms import train_transforms, eval_transforms
+from src.data.transforms import train_transforms
 from src.engine.trainer import Trainer
-from src.models.hierarchical_model import HierarchicalGroupActivityModel
-from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 from src.models.baselines import BASELINES
+from src.models.baselines.base import BaselineModel
 from src.utils.checkpointing import save_checkpoint
-from scripts.common import resolve_videos, get_backbone_fn, build_full_model, build_baseline_model, build_loader, set_seed
+from scripts.common import (
+    build_baseline_model,
+    build_full_model,
+    build_loader,
+    get_backbone_fn,
+    resolve_videos,
+    set_seed,
+)
 
 
-# ---------------------------------------------
-# Helpers
-# ---------------------------------------------
-# ── helpers ───────────────────────────────────────────────────────────────────
-
-# Shared helpers imported from src.scripts.common
+# ---------------------------------------------------------------------------
+# Trainer builder
+# ---------------------------------------------------------------------------
 
 def build_trainer(
     cfg:    Config,
     model,
-    loader: DataLoader,
+    loader,
     stage:  int = 1,
 ) -> Trainer:
     """
     For the full hierarchical model: stage-aware (1 or 2).
-    For baselines: stage=1 always (all params trained together).
+    For baselines: all params trained in one stage.
     """
-    from src.models.baselines.base import BaselineModel
-
     if isinstance(model, BaselineModel):
-        # Baselines: train all parameters in one stage
         return Trainer(
             model         = model,
             params        = model.parameters(),
@@ -83,7 +66,6 @@ def build_trainer(
             person_loss_w = cfg.loss.person_weight,
         )
 
-    # Full hierarchical model: stage-aware parameter selection
     stage_cfg = cfg.training.stage1 if stage == 1 else cfg.training.stage2
     if stage == 1:
         trainable_params = list(model.person_embedder.parameters())
@@ -105,9 +87,9 @@ def build_trainer(
     )
 
 
-# ---------------------------------------------
-# Stage runners (full model only)
-# ---------------------------------------------
+# ---------------------------------------------------------------------------
+# Stage runners
+# ---------------------------------------------------------------------------
 
 def run_stage1(cfg, model, train_loader, ckpt_dir, model_name="model") -> Path:
     print("\n" + "=" * 70)
@@ -135,9 +117,9 @@ def run_stage2(cfg, model, train_loader, ckpt_dir, model_name="model") -> Path:
     return ckpt_path
 
 
-# ---------------------------------------------
+# ---------------------------------------------------------------------------
 # CLI
-# ---------------------------------------------
+# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -145,32 +127,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=str, default="configs/default.yaml")
 
-    # ── model selection ────────────────────────────────────────────────────
+    # model selection
     parser.add_argument(
-        "--baseline", type=str, default=None,
-        metavar="KEY",
+        "--baseline", type=str, default=None, metavar="KEY",
         help=(
             "Train a baseline instead of the full hierarchical model. "
-            f"Choices: {list(BASELINES.keys())}. "
-            "Omit to train the full two-stage model."
+            f"Choices: {list(BASELINES.keys())}."
         ),
     )
 
-    # ── baseline hyper-params (ignored for full model) ─────────────────────
-    parser.add_argument("--pool",        type=str,   default=None,
-                        help="Pooling strategy for baselines: max | avg")
-    parser.add_argument("--lstm_hidden", type=int,   default=None,
-                        help="LSTM hidden size for temporal baselines (B4/B5/B6/B7)")
+    # baseline hyper-params
+    parser.add_argument("--pool",        type=str, default=None,
+                        help="Pooling strategy: max | avg")
+    parser.add_argument("--lstm_hidden", type=int, default=None,
+                        help="LSTM hidden size for temporal baselines")
 
-    # ── full-model stage selection ─────────────────────────────────────────
+    # full-model stage selection
     parser.add_argument("--stage",             type=int, default=None, choices=[1, 2])
     parser.add_argument("--stage1_checkpoint", type=str, default=None)
 
-    # ── data / output ──────────────────────────────────────────────────────
-    parser.add_argument("--data-root",   type=str, default=None)
-    parser.add_argument("--model-name",  type=str, default="model")
+    # data / output
+    parser.add_argument("--data-root",  type=str, default=None)
+    parser.add_argument("--model-name", type=str, default="model")
 
-    # ── shared hyper-params ────────────────────────────────────────────────
+    # shared hyper-params
     parser.add_argument("--lr",            type=float, default=None)
     parser.add_argument("--batch_size",    type=int,   default=None)
     parser.add_argument("--device",        type=str,   default=None)
@@ -180,9 +160,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ---------------------------------------------
+# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     args = parse_args()
@@ -194,12 +174,18 @@ def main() -> None:
     cfg = Config.from_yaml(config_path)
 
     overrides: dict = {}
-    if args.device        is not None: overrides.setdefault("training",  {})["device"]        = args.device
-    if args.batch_size    is not None: overrides.setdefault("training",  {}).setdefault("stage1", {})["batch_size"] = args.batch_size
-    if args.num_epochs    is not None: overrides.setdefault("training",  {}).setdefault("stage1", {})["epochs"]     = args.num_epochs
-    if args.lr            is not None: overrides.setdefault("training",  {}).setdefault("stage1", {})["lr"]         = args.lr
-    if args.num_subgroups is not None: overrides.setdefault("pooling",   {})["num_subgroups"]  = args.num_subgroups
-    if args.data_root     is not None: overrides.setdefault("paths",     {})["data_root"]      = args.data_root
+    if args.device        is not None:
+        overrides.setdefault("training", {})["device"] = args.device
+    if args.batch_size    is not None:
+        overrides.setdefault("training", {}).setdefault("stage1", {})["batch_size"] = args.batch_size
+    if args.num_epochs    is not None:
+        overrides.setdefault("training", {}).setdefault("stage1", {})["epochs"] = args.num_epochs
+    if args.lr            is not None:
+        overrides.setdefault("training", {}).setdefault("stage1", {})["lr"] = args.lr
+    if args.num_subgroups is not None:
+        overrides.setdefault("pooling", {})["num_subgroups"] = args.num_subgroups
+    if args.data_root     is not None:
+        overrides.setdefault("paths", {})["data_root"] = args.data_root
     if overrides:
         cfg.merge(overrides)
 
@@ -208,37 +194,54 @@ def main() -> None:
     ckpt_dir = Path("outputs/checkpoints")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── resolve which video IDs actually exist on disk ────────────────────
+    # ── resolve video IDs that exist on disk ──────────────────────────────
     data_root = Path(cfg.paths.data_root)
     if not data_root.is_absolute():
         data_root = Path(__file__).resolve().parent.parent / data_root
 
     train_videos = resolve_videos(data_root, cfg.dataset.train_videos, "TRAIN")
 
-    # ── data loaders ──────────────────────────────────────────────────────
-    crops_data = True if args.baseline in ('B2', 'B3', 'B5', 'B6', 'B7', None) else False
-    train_loader = build_loader(
-        cfg, train_videos, train_transforms,
-        shuffle=True, batch_size=cfg.training.stage1.batch_size,crops_data=True
-    )
-
     # ── model ─────────────────────────────────────────────────────────────
     if args.baseline is not None:
-        # ── BASELINE path ─────────────────────────────────────────────────
-        model      = build_baseline_model(cfg, args)
+        # BASELINE path
+        # B1 and B4 operate on full frames; all others need crops
+        crops_data = args.baseline.upper() not in ("B1", "B4")
+
+        model = build_baseline_model(
+            cfg,
+            baseline_key = args.baseline,
+            pool         = args.pool,
+            lstm_hidden  = args.lstm_hidden,
+        )
         model_name = f"{args.model_name}_{args.baseline.upper()}"
         print(f"\nTraining baseline {args.baseline.upper()}  "
-              f"(INPUT_TYPE={model.INPUT_TYPE})")
+              f"(INPUT_TYPE={model.INPUT_TYPE}, crops_data={crops_data})")
+
+        train_loader = build_loader(
+            cfg, train_videos, train_transforms,
+            shuffle    = True,
+            batch_size = cfg.training.stage1.batch_size,
+            crops_data = crops_data,
+        )
 
         build_trainer(cfg, model, train_loader).train()
 
         ckpt_path = ckpt_dir / f"{model_name}.pt"
-        save_checkpoint({"model": model.state_dict(), "baseline": args.baseline},
-                        str(ckpt_path))
+        save_checkpoint(
+            {"model": model.state_dict(), "baseline": args.baseline},
+            str(ckpt_path),
+        )
         print(f"Checkpoint saved to: {ckpt_path}")
 
     else:
-        # ── FULL MODEL path ───────────────────────────────────────────────
+        # FULL MODEL path — always uses crops
+        train_loader = build_loader(
+            cfg, train_videos, train_transforms,
+            shuffle    = True,
+            batch_size = cfg.training.stage1.batch_size,
+            crops_data = True,
+        )
+
         model = build_full_model(cfg)
 
         if args.stage == 1:
@@ -251,7 +254,7 @@ def main() -> None:
             run_stage2(cfg, model, train_loader, ckpt_dir, args.model_name)
         else:
             # Both stages sequentially
-            s1_path = run_stage1(cfg, model, train_loader, ckpt_dir, args.model_name)
+            run_stage1(cfg, model, train_loader, ckpt_dir, args.model_name)
             run_stage2(cfg, model, train_loader, ckpt_dir, args.model_name)
 
 

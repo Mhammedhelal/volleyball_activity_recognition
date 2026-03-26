@@ -3,22 +3,30 @@ src/data/dataset.py
 -------------------
 PyTorch Dataset for volleyball activity recognition.
 
-__getitem__ returns a 4-tuple:
-    crops        [N, T, C, H, W]  – per-person temporal crops  (used by B2/B3/B5/B6/B7 + full model)
-    -or-
-    full_frame   [T, C, H, W]     – full-frame temporal sequence (used by B1/B4)
-    group_label  [1]              – team activity class index
-    person_labels[N]              – individual action class indices
+__getitem__ returns a 3-tuple whose first element depends on *crops_data*:
 
-volleyball_collate handles the variable-N dimension and the new full_frame field.
+    crops_data=True  (default, used by B2/B3/B5/B6/B7 and the full model)
+        x            [N, T, C, H, W]  – per-person temporal crops
+        group_label  [1]              – team activity class index
+        person_labels[N]              – individual action class indices
+
+    crops_data=False  (used by B1 / B4)
+        x            [T, C, H, W]    – full-frame temporal sequence
+        group_label  [1]
+        person_labels[N]
+
+volleyball_collate handles the variable-N dimension and both x shapes.
+The *crops_data* flag must be consistent between the dataset and the collate
+function.  Use build_loader() in scripts/common.py to ensure this.
 """
 
-from torch.utils.data import Dataset
+from functools import partial
 from pathlib import Path
+
 import torch
 from PIL import Image
+from torch.utils.data import Dataset
 
-import sys
 from src.config import Config
 
 
@@ -26,20 +34,20 @@ class VolleyballDataset(Dataset):
     def __init__(
         self,
         root:         Path,
-        split_videos: set[int],
+        split_videos: set,
         cfg:          Config,
         transforms=None,
-        T:            int = 9,
-        crops_data=True
+        T:            int  = 9,
+        crops_data:   bool = True,
     ):
         assert T % 2 == 1, f"T must be odd for a symmetric window, got {T}"
 
-        self.root       = Path(root)
-        self.cfg        = cfg
-        self.transforms = transforms
-        self.T          = T
-        self.half       = T // 2
-        self.crops_data = crops_data
+        self.root        = Path(root)
+        self.cfg         = cfg
+        self.transforms  = transforms
+        self.T           = T
+        self.half        = T // 2
+        self.crops_data  = crops_data
 
         self.samples = []   # list of (video_id, annotation_dict)
 
@@ -47,6 +55,8 @@ class VolleyballDataset(Dataset):
             ann_file = self.root / str(video_id) / "annotations.txt"
             for ann in self._parse_annotations(ann_file):
                 self.samples.append((video_id, ann))
+
+    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -66,7 +76,7 @@ class VolleyballDataset(Dataset):
         clip_dir  = self.root / str(video_id) / str(frame_id)
 
         # Pre-load all T frames once to avoid re-opening the same file per player
-        frames_pil: dict[int, Image.Image] = {}
+        frames_pil: dict = {}
         for fid in frame_ids:
             img_path = clip_dir / f"{fid}.jpg"
             if img_path.exists():
@@ -74,65 +84,58 @@ class VolleyballDataset(Dataset):
             else:
                 frames_pil[fid] = self._nearest_frame(clip_dir, fid, frame_ids)
 
-        assert len(players) > 0, f"Sample must have at least 1 player"
+        assert len(players) > 0, "Sample must have at least 1 player"
 
         if self.crops_data:
-        # ── person crops: [N, T, C, H, W] ────────────────────────────────────
+            # ── person crops: [N, T, C, H, W] ────────────────────────────
             person_crops = []
             for p in players:
-                x, y, w, h = p["bbox"]
+                x_b, y_b, w_b, h_b = p["bbox"]
                 t_crops = []
                 for fid in frame_ids:
                     img    = frames_pil[fid]
                     iw, ih = img.size
-                    x1 = max(0, x);       y1 = max(0, y)
-                    x2 = min(iw, x + w);  y2 = min(ih, y + h)
+                    x1 = max(0, x_b);         y1 = max(0, y_b)
+                    x2 = min(iw, x_b + w_b);  y2 = min(ih, y_b + h_b)
                     if x2 <= x1 or y2 <= y1:
                         x1, y1 = 0, 0
                         x2, y2 = min(1, iw), min(1, ih)
                     crop = img.crop((x1, y1, x2, y2))
                     if self.transforms:
-                        crop = self.transforms(crop)        # [C, H, W]
+                        crop = self.transforms(crop)   # [C, H, W]
                     t_crops.append(crop)
-                person_crops.append(torch.stack(t_crops, dim=0))   # [T, C, H, W]
+                person_crops.append(torch.stack(t_crops, dim=0))  # [T, C, H, W]
 
-            crops = torch.stack(person_crops, dim=0)        # [N, T, C, H, W]
+            x = torch.stack(person_crops, dim=0)   # [N, T, C, H, W]
 
-            x = crops
+            assert x.shape[0] == len(players), "Mismatch: N players"
+            assert x.shape[1] == self.T,       "Mismatch: temporal window"
 
         else:
-        # ── full frames: [T, C, H, W] ─────────────────────────────────────────
-        # Used by frame-level baselines (B1, B4).  We apply the same transforms
-        # as for crops so the backbone sees the same normalisation.
+            # ── full frames: [T, C, H, W] ─────────────────────────────────
             full_frames = []
             for fid in frame_ids:
                 img = frames_pil[fid]
                 if self.transforms:
-                    img = self.transforms(img)              # [C, H, W]
+                    img = self.transforms(img)   # [C, H, W]
                 full_frames.append(img)
-            full_frame = torch.stack(full_frames, dim=0)    # [T, C, H, W]
-            x = full_frame
+            x = torch.stack(full_frames, dim=0)  # [T, C, H, W]
 
-        # ── labels ────────────────────────────────────────────────────────────
-        person_labels = torch.tensor(
+            assert x.shape[0] == self.T, "Mismatch: temporal window"
+
+        # ── labels ────────────────────────────────────────────────────────
+        person_labels      = torch.tensor(
             [p["action_id"] for p in players], dtype=torch.long
         )                                               # [N]
-
-        if self.crops_data: 
-            assert x.shape[0] == len(person_labels), "Mismatch: N players"
-            assert x.shape[1] == self.T,             "Mismatch: temporal window"
-        else:
-            assert x.shape[0] == self.T,             "Mismatch: temporal window"
-        group_label_tensor = torch.tensor([group_label], dtype=torch.long)  # [1]
-
-        
-        
+        group_label_tensor = torch.tensor(
+            [group_label], dtype=torch.long
+        )                                               # [1]
 
         return x, group_label_tensor, person_labels
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+    # ── helpers ───────────────────────────────────────────────────────────
 
-    def _parse_annotations(self, ann_file: Path) -> list[dict]:
+    def _parse_annotations(self, ann_file: Path) -> list:
         samples = []
         with open(ann_file, "r") as f:
             lines = [l.strip() for l in f if l.strip()]
@@ -152,7 +155,7 @@ class VolleyballDataset(Dataset):
             players = []
             for i in range(0, len(player_tokens), 5):
                 x, y, w, h = map(int, player_tokens[i : i + 4])
-                action     = player_tokens[i + 4]
+                action      = player_tokens[i + 4]
                 players.append({
                     "bbox":          (x, y, w, h),
                     "bbox_center_x": x + w / 2,
@@ -172,7 +175,7 @@ class VolleyballDataset(Dataset):
     def _nearest_frame(
         clip_dir:    Path,
         missing_fid: int,
-        frame_ids:   list[int],
+        frame_ids:   list,
     ) -> Image.Image:
         for fid in sorted(frame_ids, key=lambda f: abs(f - missing_fid)):
             img_path = clip_dir / f"{fid}.jpg"
@@ -181,27 +184,46 @@ class VolleyballDataset(Dataset):
         return Image.new("RGB", (224, 224), color=0)
 
 
-def volleyball_collate(batch: list, crops_data=True) -> tuple:
+# ---------------------------------------------------------------------------
+# Collate
+# ---------------------------------------------------------------------------
+
+def volleyball_collate(batch: list, crops_data: bool = True) -> tuple:
     """
     Custom collate for the Volleyball dataset.
 
-    Each sample from VolleyballDataset.__getitem__ is:
-        crops         [N_i, T, C, H, W]   person crops
-        -or-
-        full_frame    [T, C, H, W]         full-frame sequence
-        group_label   [1]                  team activity class index
-        person_labels [N_i]                individual action class indices
+    Each sample is a 3-tuple  (x, group_label[1], person_labels[N]).
+
+    When crops_data=True
+        x has shape [N_i, T, C, H, W] — variable N, kept as list.
+
+    When crops_data=False
+        x has shape [T, C, H, W] — fixed shape, stacked into [B, T, C, H, W].
 
     Returns
     -------
-    crops_list         : list[B] of [N_i, T, C, H, W]   variable N — kept as list
-    -or-
-    full_frames        : FloatTensor [B, T, C, H, W]     fixed shape — stacked
-    group_labels       : LongTensor  [B]
-    person_labels_list : list[B] of [N_i]                variable N — kept as list
+    x_batch            : list[Tensor [N_i, T, C, H, W]]  if crops_data
+                       : Tensor [B, T, C, H, W]           otherwise
+    group_labels       : LongTensor [B]
+    person_labels_list : list[B] of LongTensor [N_i]
     """
-    x         = [s[0] for s in batch]  if crops_data else torch.stack([s[0] for s in batch], dim=0)
-    group_labels       = torch.cat([s[1] for s in batch], dim=0)       # [B]
+    if crops_data:
+        x_batch = [s[0] for s in batch]                        # variable N — list
+    else:
+        x_batch = torch.stack([s[0] for s in batch], dim=0)   # [B, T, C, H, W]
+
+    group_labels       = torch.cat([s[1] for s in batch], dim=0)   # [B]
     person_labels_list = [s[2] for s in batch]
 
-    return x, group_labels, person_labels_list
+    return x_batch, group_labels, person_labels_list
+
+
+def make_collate_fn(crops_data: bool = True):
+    """Return a collate callable with *crops_data* baked in.
+
+    Use this instead of passing volleyball_collate directly to DataLoader so
+    that the crops_data flag is captured in a closure:
+
+        loader = DataLoader(ds, collate_fn=make_collate_fn(crops_data=True))
+    """
+    return partial(volleyball_collate, crops_data=crops_data)

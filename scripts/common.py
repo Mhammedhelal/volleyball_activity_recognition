@@ -1,29 +1,37 @@
 """
-src/scripts/common.py
----------------------
+scripts/common.py
+-----------------
 Shared helper functions used by both scripts/train.py and scripts/evaluate.py.
 """
 
+import inspect
+import random
+from functools import partial
 from pathlib import Path
 from typing import List
-import argparse
-import random
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from src.config import Config
-from src.data.dataset import VolleyballDataset, volleyball_collate
+from src.data.dataset import VolleyballDataset, make_collate_fn
 from src.data.transforms import eval_transforms
+from src.models.cnn_backbones import (
+    build_alexnet_fc7,
+    build_mobilenet_v3_large,
+    build_resnet50,
+)
 from src.models.hierarchical_model import HierarchicalGroupActivityModel
-from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 from src.models.baselines import BASELINES
-from src.engine.trainer import Trainer
 
 
+# ---------------------------------------------------------------------------
+# Video resolution
+# ---------------------------------------------------------------------------
 
 def resolve_videos(data_root: Path, requested: List[int], split_name: str) -> List[int]:
-    available: set[int] = set()
+    available: set = set()
     if data_root.is_dir():
         for subdir in sorted(data_root.iterdir()):
             if subdir.is_dir() and subdir.name.isdigit():
@@ -60,6 +68,10 @@ def resolve_videos(data_root: Path, requested: List[int], split_name: str) -> Li
     return matched
 
 
+# ---------------------------------------------------------------------------
+# Backbone helpers
+# ---------------------------------------------------------------------------
+
 def get_backbone_fn(backbone_name: str):
     backbone_map = {
         "alexnet":            build_alexnet_fc7,
@@ -68,6 +80,10 @@ def get_backbone_fn(backbone_name: str):
     }
     return backbone_map.get(backbone_name, build_alexnet_fc7)
 
+
+# ---------------------------------------------------------------------------
+# Model builders
+# ---------------------------------------------------------------------------
 
 def build_full_model(cfg: Config) -> HierarchicalGroupActivityModel:
     feature_extractor = get_backbone_fn(cfg.cnn.backbone)
@@ -84,31 +100,71 @@ def build_full_model(cfg: Config) -> HierarchicalGroupActivityModel:
     )
 
 
-def build_baseline_model(cfg: Config, baseline_key: str, **run_args):
+def build_baseline_model(
+    cfg:          Config,
+    baseline_key: str,
+    pool:         str | None = None,
+    lstm_hidden:  int | None = None,
+) -> object:
+    """
+    Instantiate a baseline model from its registry key.
+
+    Parameters
+    ----------
+    cfg          : Config
+    baseline_key : str  e.g. "B1", "B7"
+    pool         : optional pooling override ("max" | "avg")
+    lstm_hidden  : optional LSTM hidden-size override
+    """
     key = baseline_key.upper()
     if key not in BASELINES:
-        raise ValueError(f"Unknown baseline '{baseline_key}'. Choose from: {list(BASELINES.keys())}")
+        raise ValueError(
+            f"Unknown baseline '{baseline_key}'. Choose from: {list(BASELINES.keys())}"
+        )
 
     backbone_fn = get_backbone_fn(cfg.cnn.backbone)
     num_classes = cfg.labels.num_group_classes
-    pool        = run_args.get("pool") or cfg.pooling.strategy
-    lstm_hidden = run_args.get("lstm_hidden") or cfg.person_lstm.hidden_dim
+    pool        = pool        or cfg.pooling.strategy
+    lstm_hidden = lstm_hidden or cfg.person_lstm.hidden_dim
 
-    cls = BASELINES[key]
-    import inspect
+    cls    = BASELINES[key]
     sig    = inspect.signature(cls.__init__)
     params = set(sig.parameters.keys()) - {"self"}
 
-    kwargs = {"num_classes": num_classes}
-    if "backbone_fn" in params: kwargs["backbone_fn"] = backbone_fn
-    if "pool" in params: kwargs["pool"] = pool
-    if "lstm_hidden" in params: kwargs["lstm_hidden"] = lstm_hidden
-    if "lstm1_hidden" in params: kwargs["lstm1_hidden"] = lstm_hidden
+    kwargs: dict = {"num_classes": num_classes}
+    if "backbone_fn"  in params: kwargs["backbone_fn"]  = backbone_fn
+    if "pool"         in params: kwargs["pool"]          = pool
+    if "lstm_hidden"  in params: kwargs["lstm_hidden"]   = lstm_hidden
+    if "lstm1_hidden" in params: kwargs["lstm1_hidden"]  = lstm_hidden
 
     return cls(**kwargs)
 
 
-def build_loader(cfg: Config, videos: list[int], transform, shuffle: bool, batch_size: int, crops_data) -> DataLoader:
+# ---------------------------------------------------------------------------
+# DataLoader builder
+# ---------------------------------------------------------------------------
+
+def build_loader(
+    cfg:        Config,
+    videos:     List[int],
+    transform,
+    shuffle:    bool,
+    batch_size: int,
+    crops_data: bool,
+) -> DataLoader:
+    """
+    Build a DataLoader for the given video split.
+
+    Parameters
+    ----------
+    cfg        : Config
+    videos     : list of video IDs to include
+    transform  : torchvision transform pipeline
+    shuffle    : whether to shuffle samples
+    batch_size : samples per batch
+    crops_data : True  → dataset yields [N,T,C,H,W] crops (B2/B3/B5/B6/B7/full)
+                 False → dataset yields [T,C,H,W] full frames (B1/B4)
+    """
     data_root = Path(cfg.paths.data_root)
     if not data_root.is_absolute():
         project_root = Path(__file__).resolve().parent.parent
@@ -120,17 +176,22 @@ def build_loader(cfg: Config, videos: list[int], transform, shuffle: bool, batch
         cfg          = cfg,
         transforms   = transform,
         T            = cfg.dataset.num_frames,
-        crops_data=crops_data
+        crops_data   = crops_data,
     )
+
     return DataLoader(
         dataset,
         batch_size  = batch_size,
         shuffle     = shuffle,
-        collate_fn  = volleyball_collate(crops_data=crops_data),
+        collate_fn  = make_collate_fn(crops_data=crops_data),
         num_workers = cfg.dataset.num_workers,
         pin_memory  = cfg.dataset.pin_memory,
     )
 
+
+# ---------------------------------------------------------------------------
+# Reproducibility
+# ---------------------------------------------------------------------------
 
 def set_seed(seed: int) -> None:
     random.seed(seed)

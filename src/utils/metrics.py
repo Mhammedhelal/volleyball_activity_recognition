@@ -14,14 +14,7 @@ import torch
 
 
 class AverageMeter:
-    """
-    Tracks the running mean of any named scalar value.
-
-    Example
-    -------
-    >>> loss_meter = AverageMeter("train/loss")
-    >>> acc_meter  = AverageMeter("train/group_accuracy")
-    """
+    """Tracks the running mean of any named scalar value."""
 
     def __init__(self, name: str = "") -> None:
         self.name = name
@@ -46,179 +39,148 @@ class AverageMeter:
 
 class MetricsTracker:
     """
-    Accumulates per-sample predictions and targets for any named
-    classification task, then computes accuracy and confusion matrix.
-
-    Call update(...) for each sample, then call accuracy() and
-    confusion_matrix() to retrieve metrics.
-
-    Example
-    -------
-    >>> tracker = MetricsTracker("group_activity", num_classes=8)
-    >>> tracker.update(pred=[7, 3, 1], target=[7, 3, 2])
-    >>> tracker.accuracy()
-    0.6666...
-    >>> tracker.confusion_matrix()
+    Accumulates per-sample predictions and targets for a named classification
+    task, then computes accuracy, per-class accuracy, and confusion matrix.
     """
 
     def __init__(self, name: str, num_classes: int) -> None:
-        self.name          = name
-        self.num_classes   = num_classes
-        self._predictions  = []
-        self._targets      = []
-        self._confusion    = None
+        self.name        = name
+        self.num_classes = num_classes
         self.reset()
 
     def reset(self) -> None:
-        """Clear all accumulated predictions and targets."""
-        self._predictions = []
-        self._targets     = []
-        self._confusion   = torch.zeros(
+        self._predictions: list = []
+        self._targets:     list = []
+        self._confusion = torch.zeros(
             self.num_classes, self.num_classes, dtype=torch.long
         )
 
     def update(
         self,
-        pred: torch.Tensor | list[int],
-        target: torch.Tensor | list[int],
+        pred:   "torch.Tensor | list[int]",
+        target: "torch.Tensor | list[int]",
     ) -> None:
-        """
-        Accumulate (prediction, target) pairs.
-
-        Parameters
-        ----------
-        pred : torch.Tensor or list[int]
-            Predicted class labels.  Shape [...] or scalar.
-        target : torch.Tensor or list[int]
-            Ground-truth class labels. Same shape as pred.
-        """
         if isinstance(pred, list):
             pred = torch.tensor(pred, dtype=torch.long)
         if isinstance(target, list):
             target = torch.tensor(target, dtype=torch.long)
 
-        pred = pred.view(-1).long()
+        pred   = pred.view(-1).long()
         target = target.view(-1).long()
 
         self._predictions.append(pred)
         self._targets.append(target)
 
-        # Update confusion matrix
         for p, t in zip(pred, target):
             self._confusion[t, p] += 1
 
+    # ── scalar metrics ────────────────────────────────────────────────────
+
+    def accuracy(self) -> float:
+        total = self._confusion.sum().item()
+        if total == 0:
+            return 0.0
+        return self._confusion.trace().item() / total
+
+    def per_class_accuracy(self) -> dict:
+        cm    = self._confusion.float()
+        tp    = cm.diag()
+        totals = cm.sum(dim=1)
+        acc   = tp / totals.clamp(min=1e-8)
+        return {
+            str(i): acc[i].item()
+            for i in range(self.num_classes)
+        }
+
+    def accuracy_per_class(self) -> torch.Tensor:
+        cm     = self._confusion.float()
+        tp     = cm.diag()
+        totals = cm.sum(dim=1)
+        return tp / totals.clamp(min=1e-8)
+
+    def precision(self) -> float:
+        cm = self._confusion.float()
+        if cm.sum() == 0:
+            return 0.0
+        tp = cm.diag()
+        fp = cm.sum(dim=0) - tp
+        return (tp / (tp + fp).clamp(min=1e-8)).mean().item()
+
+    def precision_per_class(self) -> torch.Tensor:
+        cm = self._confusion.float()
+        tp = cm.diag()
+        fp = cm.sum(dim=0) - tp
+        return tp / (tp + fp).clamp(min=1e-8)
+
+    def recall(self) -> float:
+        cm = self._confusion.float()
+        if cm.sum() == 0:
+            return 0.0
+        tp = cm.diag()
+        fn = cm.sum(dim=1) - tp
+        return (tp / (tp + fn).clamp(min=1e-8)).mean().item()
+
+    def recall_per_class(self) -> torch.Tensor:
+        cm = self._confusion.float()
+        tp = cm.diag()
+        fn = cm.sum(dim=1) - tp
+        return tp / (tp + fn).clamp(min=1e-8)
+
+    def f1(self) -> float:
+        p = self.precision_per_class()
+        r = self.recall_per_class()
+        return (2 * p * r / (p + r).clamp(min=1e-8)).mean().item()
+
+    def f1_per_class(self) -> torch.Tensor:
+        p = self.precision_per_class()
+        r = self.recall_per_class()
+        return 2 * p * r / (p + r).clamp(min=1e-8)
+
+    def confusion_matrix(self) -> torch.Tensor:
+        return self._confusion.clone()
+
     def predictions(self) -> torch.Tensor:
-        """Return all accumulated predictions as a single tensor."""
         if not self._predictions:
             return torch.tensor([], dtype=torch.long)
         return torch.cat(self._predictions, dim=0)
 
     def targets(self) -> torch.Tensor:
-        """Return all accumulated targets as a single tensor."""
         if not self._targets:
             return torch.tensor([], dtype=torch.long)
         return torch.cat(self._targets, dim=0)
 
-    def accuracy(self) -> float:
+    # ── summary dict (used by Evaluator) ─────────────────────────────────
+
+    def summary(self) -> dict:
         """
-        Compute classification accuracy.
+        Return a dict with all metrics in one call.
 
-        Returns
-        -------
-        float
-            Fraction of correct predictions (0 to 1).
+        Keys
+        ----
+        accuracy        : float
+        per_class       : dict[class_name_or_idx, float]
+        correct         : int
+        total           : int
+        confusion_matrix: Tensor [C, C]
         """
-        total   = self._confusion.sum().item()
-        if total == 0:
-            return 0.0
-        correct = self._confusion.trace().item()
-        return correct / total
+        cm      = self._confusion
+        total   = cm.sum().item()
+        correct = cm.trace().item()
 
-    def accuracy_per_class(self):
-        cm = self._confusion.float()
+        per_class_acc = {}
+        for i in range(self.num_classes):
+            row_total = cm[i].sum().item()
+            per_class_acc[str(i)] = (
+                cm[i, i].item() / row_total if row_total > 0 else 0.0
+            )
 
-        if cm.sum() == 0:
-            return torch.zeros(self.num_classes)
-
-        tp = cm.diag()
-        total_per_class = cm.sum(dim=1)
-
-        acc = tp / total_per_class.clamp(min=1e-8)
-        return acc
-
-    def precision(self) -> float:
-        cm = self._confusion.float()
-
-        if cm.sum() == 0:
-            return 0.0
-
-        tp = cm.diag()
-        fp = cm.sum(dim=0) - tp
-
-        precision = tp / (tp + fp).clamp(min=1e-8)
-        return precision.mean().item()
-
-    def precision_per_class(self):
-        cm = self._confusion.float()
-
-        if cm.sum() == 0:
-            return torch.zeros(self.num_classes)
-
-        tp = cm.diag()
-        fp = cm.sum(dim=0) - tp
-
-        precision = tp / (tp + fp).clamp(min=1e-8)
-        return precision
-
-    def recall(self) -> float:
-        cm = self._confusion.float()
-
-        if cm.sum() == 0:
-            return 0.0
-
-        tp = cm.diag()
-        fn = cm.sum(dim=1) - tp
-
-        recall = tp / (tp + fn).clamp(min=1e-8)
-        return recall.mean().item()
-    
-    def recall_per_class(self):
-        cm = self._confusion.float()
-
-        if cm.sum() == 0:
-            return torch.zeros(self.num_classes)
-
-        tp = cm.diag()
-        fn = cm.sum(dim=1) - tp
-
-        recall = tp / (tp + fn).clamp(min=1e-8)
-        return recall
-
-    def f1(self):
-        precision = self.precision_per_class()
-        recall = self.recall_per_class()
-
-        f1 = 2 * (precision * recall) / (precision + recall).clamp(min=1e-8)
-        return f1.mean().item()
-    
-    def f1_per_class(self):
-        precision = self.precision_per_class()
-        recall = self.recall_per_class()
-
-        f1 = 2 * (precision * recall) / (precision + recall).clamp(min=1e-8)
-        return f1
-
-    def confusion_matrix(self) -> torch.Tensor:
-        """
-        Return the confusion matrix.
-
-        Returns
-        -------
-        torch.Tensor
-            Confusion matrix of shape (num_classes, num_classes).
-            Entry [i, j] = count of samples with true class i predicted as j.
-        """
-        return self._confusion.clone()
+        return {
+            "accuracy":        correct / total if total > 0 else 0.0,
+            "per_class":       per_class_acc,
+            "correct":         int(correct),
+            "total":           int(total),
+            "confusion_matrix": cm.clone(),
+        }
 
     def __repr__(self) -> str:
         return (
