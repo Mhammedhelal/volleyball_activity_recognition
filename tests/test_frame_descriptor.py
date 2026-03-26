@@ -123,18 +123,18 @@ class TestFrameDescriptorGradients:
         loss  = model(Z).sum()
         loss.backward()
 
-        for name, param in model.lstm.named_parameters():
+        for name, param in model.group_lstm.named_parameters():
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
-            
 
     def test_gradient_flows_to_group_fc(self):
         model = FrameDescriptor(Z_DIM, LSTM_HIDDEN, GROUP_CLASSES)
         Z     = make_Z()
-        model(Z).sum().backward()
+        loss  = model(Z).sum()
+        loss.backward()
 
-        for name, param in model.lstm.named_parameters():
+        for name, param in model.group_fc.named_parameters():
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
@@ -151,11 +151,15 @@ class TestFrameDescriptorDevice:
         model = FrameDescriptor(Z_DIM, LSTM_HIDDEN, GROUP_CLASSES).to(device)
 
         logits = model(Z)
-        assert logits.device == device
+        assert logits.device == torch.device(device)
+
+        loss = logits.sum()
+        loss.backward()
 
         for param in model.parameters():
             if param.requires_grad:
-                assert param.grad.device == device
+                assert param.grad is not None
+                assert param.grad.device == torch.device(device)
 
 
 
@@ -171,4 +175,4 @@ class TestFrameDescriptorEval:
         logits_1 = model(Z)
         logits_2 = model(Z)
 
-        assert torch.allclose(logits_1, logits_2, atol=1e-6), "eval mode is not deteministic."
+        assert torch.allclose(logits_1, logits_2, atol=1e-6), "eval mode is not deterministic."

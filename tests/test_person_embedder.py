@@ -221,12 +221,16 @@ class TestPersonEmbedderDevice:
         ).to(device)
 
         logits, P = model(x)
-        assert logits.device == device
-        assert P.device == device
+        assert logits.device == torch.device(device)
+        assert P.device == torch.device(device)
+
+        loss = logits.sum()
+        loss.backward()
 
         for param in model.parameters():
             if param.requires_grad:
-                assert param.grad.device == device
+                assert param.grad is not None
+                assert param.grad.device == torch.device(device)
 
 
 # ─────────────────────────────────────────────
@@ -242,5 +246,5 @@ class TestPersonEmbedderEval:
         logits_1, P_1 = model(x)
         logits_2, P_2 = model(x)
 
-        assert torch.allclose(logits_1, logits_2, atol=1e-6) and torch.allclose(P_1, P_2, atol=1e-6), "eval mode is not deteministic."
+        assert torch.allclose(logits_1, logits_2, atol=1e-6) and torch.allclose(P_1, P_2, atol=1e-6), "eval mode is not deterministic."
         

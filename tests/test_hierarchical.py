@@ -147,13 +147,18 @@ class TestHierarchicalGradients:
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_group_loss_grad_reaches_lstm2(self, feature_extractor):
         """Group-activity loss must flow back to LSTM2 (group_lstm) weights."""
-        m = HierarchicalGroupActivityModel(
+        model = HierarchicalGroupActivityModel(
             feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
-        group_logits, _ = m(torch.randn(N, T, C, H, W))
+        group_logits, _ = model(torch.randn(N, T, C, H, W))
         group_logits.sum().backward()
 
-        for name, param in model.lstm.named_parameters():
+        for name, param in model.person_embedder.lstm.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+
+        for name, param in model.frame_descriptor.group_lstm.named_parameters():
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
@@ -161,13 +166,18 @@ class TestHierarchicalGradients:
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_person_loss_grad_reaches_lstm1(self, feature_extractor):
         """Person-action loss must flow back to LSTM1 (person_embedder.lstm)."""
-        m = HierarchicalGroupActivityModel(
+        model = HierarchicalGroupActivityModel(
             feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
-        _, person_logits = m(torch.randn(N, T, C, H, W))
+        _, person_logits = model(torch.randn(N, T, C, H, W))
         person_logits.sum().backward()
 
-        for name, param in model.lstm.named_parameters():
+        for name, param in model.person_embedder.lstm.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+
+        for name, param in model.frame_descriptor.group_lstm.named_parameters():
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
@@ -248,6 +258,6 @@ class TestHierarchicalEval:
         group_logits_2, person_logits_2 = model(x)
 
         assert torch.allclose(group_logits_1, group_logits_2, atol=1e-6) \
-        and torch.allclose(person_logits_1, person_logits_2, atol=1e-6), "eval mode is not deteministic."
+        and torch.allclose(person_logits_1, person_logits_2, atol=1e-6), "eval mode is not deterministic."
 
     

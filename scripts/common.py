@@ -108,7 +108,7 @@ def build_baseline_model(cfg: Config, baseline_key: str, **run_args):
     return cls(**kwargs)
 
 
-def build_loader(cfg: Config, videos: list[int], transform, shuffle: bool, batch_size: int) -> DataLoader:
+def build_loader(cfg: Config, videos: list[int], transform, shuffle: bool, batch_size: int, crops_data) -> DataLoader:
     data_root = Path(cfg.paths.data_root)
     if not data_root.is_absolute():
         project_root = Path(__file__).resolve().parent.parent
@@ -120,12 +120,13 @@ def build_loader(cfg: Config, videos: list[int], transform, shuffle: bool, batch
         cfg          = cfg,
         transforms   = transform,
         T            = cfg.dataset.num_frames,
+        crops_data=crops_data
     )
     return DataLoader(
         dataset,
         batch_size  = batch_size,
         shuffle     = shuffle,
-        collate_fn  = volleyball_collate,
+        collate_fn  = volleyball_collate(crops_data=crops_data),
         num_workers = cfg.dataset.num_workers,
         pin_memory  = cfg.dataset.pin_memory,
     )

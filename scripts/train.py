@@ -216,9 +216,10 @@ def main() -> None:
     train_videos = resolve_videos(data_root, cfg.dataset.train_videos, "TRAIN")
 
     # ── data loaders ──────────────────────────────────────────────────────
+    crops_data = True if args.baseline in ('B2', 'B3', 'B5', 'B6', 'B7', None) else False
     train_loader = build_loader(
         cfg, train_videos, train_transforms,
-        shuffle=True, batch_size=cfg.training.stage1.batch_size,
+        shuffle=True, batch_size=cfg.training.stage1.batch_size,crops_data=True
     )
 
     # ── model ─────────────────────────────────────────────────────────────
