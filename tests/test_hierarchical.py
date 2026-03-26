@@ -153,10 +153,10 @@ class TestHierarchicalGradients:
         group_logits, _ = m(torch.randn(N, T, C, H, W))
         group_logits.sum().backward()
 
-        for name, param in m.frame_descriptor.group_lstm.named_parameters():
-            assert param.grad is not None and param.grad.abs().sum() > 0, (
-                f"No gradient reached group_lstm param '{name}'"
-            )
+        for name, param in model.lstm.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_person_loss_grad_reaches_lstm1(self, feature_extractor):
@@ -167,10 +167,10 @@ class TestHierarchicalGradients:
         _, person_logits = m(torch.randn(N, T, C, H, W))
         person_logits.sum().backward()
 
-        for name, param in m.person_embedder.lstm.named_parameters():
-            assert param.grad is not None and param.grad.abs().sum() > 0, (
-                f"No gradient reached person lstm param '{name}'"
-            )
+        for name, param in model.lstm.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_stage2_freeze_blocks_person_embedder_grad(self, feature_extractor):
@@ -207,3 +207,47 @@ class TestHierarchicalGradients:
             assert param.grad is not None and param.grad.abs().sum() > 0, (
                 f"LSTM2 param '{name}' has no gradient after stage-2 freeze"
             )
+
+
+
+# ─────────────────────────────────────────────
+# Device Consistency tests
+# ─────────────────────────────────────────────
+@pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
+class TestHierarchicalDevice:
+    def test_forward_backward(self, device):
+        x = torch.randn(N, T, C, H, W, device=device)
+        model = HierarchicalGroupActivityModel(
+            feature_extractor=build_alexnet_fc7,
+            lstm_hidden_p=LSTM_HIDDEN_P,
+            lstm_hidden_g=LSTM_HIDDEN_G,
+            n_subgroups=2,
+        ).to(device)
+
+        g_logits, p_logits = model(x)
+        assert g_logits.device == device
+        assert p_logits.device == device
+        
+        for param in model.parameters():
+            if param.requires_grad:
+                assert param.grad.device == device
+
+
+# ─────────────────────────────────────────────
+# eval mode determinism tests
+# ─────────────────────────────────────────────
+class TestHierarchicalEval:
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_eval_mode_determinism(self, feature_extractor):
+        model = HierarchicalGroupActivityModel(
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
+        )
+        x     = torch.randn(4, T, C, H, W)
+        model.eval()
+        group_logits_1, person_logits_1 = model(x)
+        group_logits_2, person_logits_2 = model(x)
+
+        assert torch.allclose(group_logits_1, group_logits_2, atol=1e-6) \
+        and torch.allclose(person_logits_1, person_logits_2, atol=1e-6), "eval mode is not deteministic."
+
+    

@@ -19,7 +19,7 @@ import torch.nn as nn
 from typing import Callable
 
 from src.models.baselines.base import BaselineModel
-from src.models.cnn_backbones import build_alexnet_fc7
+from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 
 
 class B1_ImageClassifier(BaselineModel):

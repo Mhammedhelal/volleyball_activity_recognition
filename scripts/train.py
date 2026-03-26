@@ -48,6 +48,7 @@ from src.models.hierarchical_model import HierarchicalGroupActivityModel
 from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 from src.models.baselines import BASELINES
 from src.utils.checkpointing import save_checkpoint
+from scripts.common import resolve_videos, get_backbone_fn, build_full_model, build_baseline_model, build_loader, set_seed
 
 
 # ---------------------------------------------
@@ -55,146 +56,7 @@ from src.utils.checkpointing import save_checkpoint
 # ---------------------------------------------
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def resolve_videos(data_root: Path, requested: list[int], split_name: str) -> list[int]:
-    """
-    Return the subset of `requested` video IDs that actually exist on disk
-    (i.e. {data_root}/{id}/annotations.txt is present).
-
-    Prints a clear summary so the user knows what was found vs. missing.
-    Falls back to ALL discovered videos (with annotations) when none of the
-    requested IDs are found — useful when you only have a small subset of the
-    full dataset.
-    """
-    # Discover every numeric subdirectory that has annotations.txt
-    available: set[int] = set()
-    if data_root.is_dir():
-        for subdir in sorted(data_root.iterdir()):
-            if subdir.is_dir() and subdir.name.isdigit():
-                if (subdir / "annotations.txt").exists():
-                    available.add(int(subdir.name))
-
-    if not available:
-        raise FileNotFoundError(
-            f"No video folders with annotations.txt found under: {data_root}\n"
-            f"Expected structure: {data_root}/<video_id>/annotations.txt"
-        )
-
-    requested_set = set(requested)
-    matched       = sorted(available & requested_set)
-    missing       = sorted(requested_set - available)
-    extra         = sorted(available - requested_set)
-
-    print(f"\n── {split_name} videos ──────────────────────────────")
-    print(f"  Requested in config : {sorted(requested_set)}")
-    print(f"  Found on disk       : {sorted(available)}")
-    if matched:
-        print(f"  ✔ Using            : {matched}")
-    if missing:
-        print(f"  ✘ Missing (skipped): {missing}")
-    if extra:
-        print(f"  ℹ  Extra on disk   : {extra}  (not in this split)")
-
-    if not matched:
-        print(f"\n  ⚠  None of the {split_name} IDs exist on disk.")
-        print(f"     Falling back to ALL available: {sorted(available)}")
-        matched = sorted(available)
-
-    print()
-    return matched
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def build_full_model(cfg: Config) -> HierarchicalGroupActivityModel:
-    backbone_map = {
-        "alexnet":           build_alexnet_fc7,
-        "resnet50":          build_resnet50,
-        "mobilenet_v3_large": build_mobilenet_v3_large,
-    }
-    feature_extractor = backbone_map.get(cfg.cnn.backbone, build_alexnet_fc7)
-
-    return HierarchicalGroupActivityModel(
-        feature_extractor = feature_extractor,
-        lstm_hidden_p     = cfg.person_lstm.hidden_dim,
-        lstm_hidden_g     = cfg.group_lstm.hidden_dim,
-        person_classes    = cfg.labels.num_person_classes,
-        group_classes     = cfg.labels.num_group_classes,
-        n_subgroups       = cfg.pooling.num_subgroups,
-        pool              = cfg.pooling.strategy,
-        n_layers_p        = cfg.person_lstm.num_layers,
-        n_layers_g        = cfg.group_lstm.num_layers,
-    )
-
-
-def build_baseline_model(cfg: Config, args: argparse.Namespace):
-    """Instantiate the requested baseline from BASELINES registry."""
-    baseline_key = args.baseline.upper()
-    if baseline_key not in BASELINES:
-        raise ValueError(
-            f"Unknown baseline '{args.baseline}'. "
-            f"Choose from: {list(BASELINES.keys())}"
-        )
-
-    backbone_map = {
-        "alexnet":           build_alexnet_fc7,
-        "resnet50":          build_resnet50,
-        "mobilenet_v3_large": build_mobilenet_v3_large,
-    }
-    backbone_fn  = backbone_map.get(cfg.cnn.backbone, build_alexnet_fc7)
-    num_classes  = cfg.labels.num_group_classes
-    pool         = getattr(args, "pool", None) or cfg.pooling.strategy
-    lstm_hidden  = getattr(args, "lstm_hidden", None) or cfg.person_lstm.hidden_dim
-
-    cls = BASELINES[baseline_key]
-
-    # Each baseline accepts different kwargs — pass only what it supports
-    import inspect
-    sig    = inspect.signature(cls.__init__)
-    params = set(sig.parameters.keys()) - {"self"}
-
-    kwargs: dict = {"num_classes": num_classes}
-    if "backbone_fn"  in params: kwargs["backbone_fn"]  = backbone_fn
-    if "pool"         in params: kwargs["pool"]          = pool
-    if "lstm_hidden"  in params: kwargs["lstm_hidden"]   = lstm_hidden
-    if "lstm1_hidden" in params: kwargs["lstm1_hidden"]  = lstm_hidden
-
-    return cls(**kwargs)
-
-
-def build_loader(
-    cfg:        Config,
-    videos:     list[int],
-    transform,
-    shuffle:    bool,
-    batch_size: int,
-) -> DataLoader:
-    data_root = Path(cfg.paths.data_root)
-    if not data_root.is_absolute():
-        project_root = Path(__file__).resolve().parent.parent
-        data_root    = project_root / data_root
-
-    dataset = VolleyballDataset(
-        root         = data_root,
-        split_videos = set(videos),
-        cfg          = cfg,
-        transforms   = transform,
-        T            = cfg.dataset.num_frames,
-    )
-    return DataLoader(
-        dataset,
-        batch_size  = batch_size,
-        shuffle     = shuffle,
-        collate_fn  = volleyball_collate,
-        num_workers = cfg.dataset.num_workers,
-        pin_memory  = cfg.dataset.pin_memory,
-    )
-
+# Shared helpers imported from src.scripts.common
 
 def build_trainer(
     cfg:    Config,

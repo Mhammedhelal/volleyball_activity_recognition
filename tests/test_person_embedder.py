@@ -187,8 +187,9 @@ class TestPersonEmbedderGradients:
         loss.backward()
 
         for name, param in model.lstm.named_parameters():
-            assert param.grad is not None, f"No gradient for LSTM param '{name}'"
-            assert param.grad.abs().sum() > 0, f"Zero gradient for LSTM param '{name}'"
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_no_gradient_in_cnn(self, feature_extractor):
@@ -202,3 +203,44 @@ class TestPersonEmbedderGradients:
             assert param.grad is None, (
                 f"Unexpected gradient in frozen CNN param '{name}'"
             )
+
+
+
+
+# ─────────────────────────────────────────────
+# Device Consistency tests
+# ─────────────────────────────────────────────
+@pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
+class TestPersonEmbedderDevice:
+    def test_forward_backward(self, device):
+        x = torch.randn(N, T, C, H, W, device=device)
+        model = PersonEmbedder(
+            feature_extractor=build_alexnet_fc7,
+            lstm_hidden=LSTM_HIDDEN,
+            person_classes=PERSON_CLASSES,
+        ).to(device)
+
+        logits, P = model(x)
+        assert logits.device == device
+        assert P.device == device
+
+        for param in model.parameters():
+            if param.requires_grad:
+                assert param.grad.device == device
+
+
+# ─────────────────────────────────────────────
+# eval mode determinism tests
+# ─────────────────────────────────────────────
+
+class TestPersonEmbedderEval:
+    @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
+    def test_eval_mode_determinism(self, feature_extractor):
+        model = PersonEmbedder(feature_extractor=feature_extractor, lstm_hidden=LSTM_HIDDEN, person_classes=PERSON_CLASSES)
+        x     = torch.randn(4, T, C, H, W)
+        model.eval()
+        logits_1, P_1 = model(x)
+        logits_2, P_2 = model(x)
+
+        assert torch.allclose(logits_1, logits_2, atol=1e-6) and torch.allclose(P_1, P_2, atol=1e-6), "eval mode is not deteministic."
+        

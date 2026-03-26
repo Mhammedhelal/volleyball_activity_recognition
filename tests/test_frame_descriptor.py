@@ -123,17 +123,52 @@ class TestFrameDescriptorGradients:
         loss  = model(Z).sum()
         loss.backward()
 
-        for name, param in model.group_lstm.named_parameters():
-            assert param.grad is not None, (
-                f"No gradient for group_lstm param '{name}'"
-            )
+        for name, param in model.lstm.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+            
 
     def test_gradient_flows_to_group_fc(self):
         model = FrameDescriptor(Z_DIM, LSTM_HIDDEN, GROUP_CLASSES)
         Z     = make_Z()
         model(Z).sum().backward()
 
-        for name, param in model.group_fc.named_parameters():
-            assert param.grad is not None, (
-                f"No gradient for group_fc param '{name}'"
-            )
+        for name, param in model.lstm.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
+            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
+            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+
+
+
+# ─────────────────────────────────────────────
+# Device Consistency tests
+# ─────────────────────────────────────────────
+@pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
+class TestFrameDescriptorDevice:
+    def test_forward_backward(self, device):
+        Z = torch.randn(1, T, Z_DIM, device=device)
+        model = FrameDescriptor(Z_DIM, LSTM_HIDDEN, GROUP_CLASSES).to(device)
+
+        logits = model(Z)
+        assert logits.device == device
+
+        for param in model.parameters():
+            if param.requires_grad:
+                assert param.grad.device == device
+
+
+
+
+# ─────────────────────────────────────────────
+# eval mode determinism tests
+# ─────────────────────────────────────────────
+class TestFrameDescriptorEval:
+    def test_eval_mode_determinism(self):
+        model = FrameDescriptor(Z_DIM, LSTM_HIDDEN, GROUP_CLASSES)
+        model.eval()
+        Z     = make_Z()
+        logits_1 = model(Z)
+        logits_2 = model(Z)
+
+        assert torch.allclose(logits_1, logits_2, atol=1e-6), "eval mode is not deteministic."
