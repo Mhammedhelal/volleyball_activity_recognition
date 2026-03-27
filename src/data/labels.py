@@ -1,23 +1,29 @@
 # ─────────────────────────────────────────────
 # Label Definitions
 # ─────────────────────────────────────────────
-import json
+#
+# Labels are loaded exclusively from configs/default.yaml so there is a
+# single source of truth.  labels.json is no longer used and can be deleted.
+#
 from pathlib import Path
 
-_LABELS_FILE = Path(__file__).parent / "labels.json"
+import yaml
 
-with open(_LABELS_FILE) as f:
-    _labels = json.load(f)
+_DEFAULT_YAML = Path(__file__).resolve().parent.parent.parent / "configs" / "default.yaml"
 
-# Sort by integer value so index position == class index
-# labels.json stores {"name": index, ...} dicts
-PERSON_ACTIONS: list[str] = [
-    k for k, v in sorted(_labels["person_actions"].items(), key=lambda x: x[1])
-]
-GROUP_ACTIVITIES: list[str] = [
-    k for k, v in sorted(_labels["group_activities"].items(), key=lambda x: x[1])
-]
+with _DEFAULT_YAML.open("r") as _f:
+    _cfg = yaml.safe_load(_f)
+
+# Preserve the list order defined in default.yaml (index == class index)
+PERSON_ACTIONS: list[str] = list(_cfg["labels"]["person_actions"])
+GROUP_ACTIVITIES: list[str] = list(_cfg["labels"]["group_activities"])
 
 # Sanity check — must match default.yaml expectations
-assert len(PERSON_ACTIONS)   == 9,  f"Expected 9 person actions,   got {len(PERSON_ACTIONS)}"
-assert len(GROUP_ACTIVITIES) == 8,  f"Expected 8 group activities, got {len(GROUP_ACTIVITIES)}"
+assert len(PERSON_ACTIONS) == _cfg["labels"]["num_person_classes"], (
+    f"Expected {_cfg['labels']['num_person_classes']} person actions, "
+    f"got {len(PERSON_ACTIONS)}"
+)
+assert len(GROUP_ACTIVITIES) == _cfg["labels"]["num_group_classes"], (
+    f"Expected {_cfg['labels']['num_group_classes']} group activities, "
+    f"got {len(GROUP_ACTIVITIES)}"
+)

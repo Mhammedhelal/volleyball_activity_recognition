@@ -20,7 +20,6 @@ DataLoader collate format (3-tuple from volleyball_collate):
 
 import torch
 
-from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
 from src.utils.metrics import MetricsTracker
 
 _DEFAULT_INPUT_TYPE      = "crops"
@@ -50,8 +49,18 @@ class Evaluator:
         # crops_data mirrors input_type
         self.crops_data = (self.input_type != "frame")
 
-        self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
-        self.person_tracker = MetricsTracker(PERSON_ACTIONS,   len(PERSON_ACTIONS))
+        # ── labels from config ────────────────────────────────────────────
+        if cfg is not None:
+            self.group_activities = cfg.labels.group_activities
+            self.person_actions   = cfg.labels.person_actions
+        else:
+            # Fallback to default (for backward compatibility)
+            from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
+            self.group_activities = GROUP_ACTIVITIES
+            self.person_actions   = PERSON_ACTIONS
+
+        self.group_tracker  = MetricsTracker(self.group_activities, len(self.group_activities))
+        self.person_tracker = MetricsTracker(self.person_actions,   len(self.person_actions))
 
     @torch.no_grad()
     def evaluate(self) -> dict:

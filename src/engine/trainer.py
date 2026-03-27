@@ -30,7 +30,6 @@ from pathlib import Path
 from typing import Iterable
 
 from src.utils.metrics import AverageMeter, MetricsTracker
-from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
 
 _DEFAULT_INPUT_TYPE      = "crops"
 _DEFAULT_HAS_PERSON_LOSS = True
@@ -45,6 +44,7 @@ class Trainer:
         params         : parameters the optimizer should update
         train_loader   : DataLoader using make_collate_fn(crops_data=...)
         val_loader     : optional DataLoader for per-epoch validation
+        cfg            : Config object containing labels and other settings
         device         : "cuda" or "cpu"  (auto-detected if not provided)
         learning_rate  : default 1e-5 (paper value)
         momentum       : default 0.9  (paper value)
@@ -63,6 +63,7 @@ class Trainer:
         params:         Iterable[nn.Parameter],
         train_loader,
         val_loader      = None,
+        cfg             = None,
         device:         str   = None,
         learning_rate:  float = 1e-5,
         momentum:       float = 0.9,
@@ -105,10 +106,20 @@ class Trainer:
         self.criterion_group   = nn.CrossEntropyLoss()
         self.criterion_players = nn.CrossEntropyLoss()
 
+        # ── labels from config ────────────────────────────────────────────
+        if cfg is not None:
+            self.group_activities = cfg.labels.group_activities
+            self.person_actions   = cfg.labels.person_actions
+        else:
+            # Fallback to default (for backward compatibility)
+            from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
+            self.group_activities = GROUP_ACTIVITIES
+            self.person_actions   = PERSON_ACTIONS
+
         # ── meters & trackers ─────────────────────────────────────────────
         self.loss_meter     = AverageMeter(name="loss")
-        self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
-        self.person_tracker = MetricsTracker(PERSON_ACTIONS,   len(PERSON_ACTIONS))
+        self.group_tracker  = MetricsTracker(self.group_activities, len(self.group_activities))
+        self.person_tracker = MetricsTracker(self.person_actions,   len(self.person_actions))
 
         # ── best-model tracking ───────────────────────────────────────────
         self.best_val_group_acc = 0.0
