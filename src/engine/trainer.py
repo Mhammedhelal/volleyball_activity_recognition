@@ -5,32 +5,20 @@ Training loop for both the hierarchical model and all baseline models.
 
 Routing logic
 -------------
-The trainer inspects two class-level flags on the model:
-
     model.INPUT_TYPE      "frame"  → feed full frames  [T, C, H, W]  per sample
                           "crops"  → feed crops         [N, T, C, H, W]  per sample
 
     model.HAS_PERSON_LOSS True  → model returns (group_logits, person_logits)
-                                  and person_labels are used in the aux loss
                           False → model returns group_logits only
-                                  (person_labels are ignored)
 
-The full HierarchicalGroupActivityModel always has:
-    INPUT_TYPE      = "crops"
-    HAS_PERSON_LOSS = True
+DataLoader collate format (3-tuple from volleyball_collate):
 
-All baselines have HAS_PERSON_LOSS = False.
-
-DataLoader collate format
--------------------------
-volleyball_collate now returns a **3-tuple**:
-
-    crops_data=True  (INPUT_TYPE == "crops")
+    crops_data=True
         x_batch            : list[B] of Tensor [N_i, T, C, H, W]
         group_labels       : LongTensor [B]
         person_labels_list : list[B] of LongTensor [N_i]
 
-    crops_data=False  (INPUT_TYPE == "frame")
+    crops_data=False
         x_batch            : Tensor [B, T, C, H, W]
         group_labels       : LongTensor [B]
         person_labels_list : list[B] of LongTensor [N_i]
@@ -38,12 +26,12 @@ volleyball_collate now returns a **3-tuple**:
 
 import torch
 import torch.nn as nn
+from pathlib import Path
 from typing import Iterable
 
 from src.utils.metrics import AverageMeter, MetricsTracker
 from src.data.labels import GROUP_ACTIVITIES, PERSON_ACTIONS
 
-# Sentinel defaults (backwards-compat with full hierarchical model)
 _DEFAULT_INPUT_TYPE      = "crops"
 _DEFAULT_HAS_PERSON_LOSS = True
 
@@ -56,12 +44,17 @@ class Trainer:
         model          : HierarchicalGroupActivityModel or any BaselineModel
         params         : parameters the optimizer should update
         train_loader   : DataLoader using make_collate_fn(crops_data=...)
-        device         : "cuda" or "cpu"
+        val_loader     : optional DataLoader for per-epoch validation
+        device         : "cuda" or "cpu"  (auto-detected if not provided)
         learning_rate  : default 1e-5 (paper value)
         momentum       : default 0.9  (paper value)
         num_epochs     : total training epochs
         person_loss_w  : weight of auxiliary person-action loss
+        grad_clip      : max gradient norm (0 = disabled)
         log_every      : print summary every N epochs
+        checkpoint_dir : directory to save best model checkpoint
+        model_name     : prefix for checkpoint filenames
+        stage          : training stage (1 or 2), used in checkpoint name
     """
 
     def __init__(
@@ -69,27 +62,40 @@ class Trainer:
         model,
         params:         Iterable[nn.Parameter],
         train_loader,
-        device:         str   = "cuda",
+        val_loader      = None,
+        device:         str   = None,
         learning_rate:  float = 1e-5,
         momentum:       float = 0.9,
         num_epochs:     int   = 100,
         person_loss_w:  float = 1.0,
+        grad_clip:      float = 5.0,
         log_every:      int   = 10,
+        checkpoint_dir: str   = "outputs/checkpoints",
+        model_name:     str   = "model",
+        stage:          int   = 1,
     ):
+        # ── device (auto-detect if not provided) ─────────────────────────
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
+
         self.model          = model.to(device)
         self.train_loader   = train_loader
-        self.device         = device
+        self.val_loader     = val_loader
         self.num_epochs     = num_epochs
         self.person_loss_w  = person_loss_w
+        self.grad_clip      = grad_clip
         self.log_every      = log_every
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.model_name     = model_name
+        self.stage          = stage
 
-        # Read routing flags with safe defaults
+        # ── model routing flags ───────────────────────────────────────────
         self.input_type      = getattr(model, "INPUT_TYPE",      _DEFAULT_INPUT_TYPE)
         self.has_person_loss = getattr(model, "HAS_PERSON_LOSS", _DEFAULT_HAS_PERSON_LOSS)
+        self.crops_data      = (self.input_type != "frame")
 
-        # crops_data mirrors input_type: frame-level models use stacked full frames
-        self.crops_data = (self.input_type != "frame")
-
+        # ── optimiser ────────────────────────────────────────────────────
         self.optimizer = torch.optim.SGD(
             params,
             lr=learning_rate,
@@ -99,44 +105,43 @@ class Trainer:
         self.criterion_group   = nn.CrossEntropyLoss()
         self.criterion_players = nn.CrossEntropyLoss()
 
+        # ── meters & trackers ─────────────────────────────────────────────
         self.loss_meter     = AverageMeter(name="loss")
         self.group_tracker  = MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
-        self.person_tracker = MetricsTracker(PERSON_ACTIONS, len(PERSON_ACTIONS))
+        self.person_tracker = MetricsTracker(PERSON_ACTIONS,   len(PERSON_ACTIONS))
 
+        # ── best-model tracking ───────────────────────────────────────────
+        self.best_val_group_acc = 0.0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
     # ------------------------------------------------------------------
 
     def _forward_sample(
         self,
-        x:             torch.Tensor,   # [N, T, C, H, W]  OR  [T, C, H, W]
-        group_label:   torch.Tensor,   # scalar or [1]
-        person_labels: torch.Tensor,   # [N]
+        x:             torch.Tensor,
+        group_label:   torch.Tensor,
+        person_labels: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Run one sample forward, compute loss, update trackers.
-        Returns the scalar loss for this sample.
-        """
-        # ── forward pass ──────────────────────────────────────────────────
+        """Forward one sample, compute combined loss, update trackers."""
         if self.has_person_loss:
             group_logits, person_logits = self.model(x)
         else:
             group_logits  = self.model(x)
             person_logits = None
 
-        # ── group loss ────────────────────────────────────────────────────
         g_label = group_label.view(1) if group_label.dim() == 0 else group_label
         loss = self.criterion_group(
-            group_logits.unsqueeze(0),   # [1, C]
-            g_label,                     # [1]
+            group_logits.unsqueeze(0),
+            g_label,
         )
 
-        # ── optional person loss ──────────────────────────────────────────
         if self.has_person_loss and person_logits is not None:
             loss = loss + self.person_loss_w * self.criterion_players(
-                person_logits,   # [N, P]
-                person_labels,   # [N]
+                person_logits,
+                person_labels,
             )
 
-        # ── update trackers (no grad) ─────────────────────────────────────
         with torch.no_grad():
             self.group_tracker.update(
                 preds   = group_logits.argmax().unsqueeze(0),
@@ -150,54 +155,51 @@ class Trainer:
 
         return loss
 
-    # ------------------------------------------------------------------
+    def _run_loader(self, loader, train: bool) -> dict:
+        """Run one full pass over *loader*. Backprop only when train=True."""
+        if train:
+            self.model.train()
+        else:
+            self.model.eval()
 
-    def train_epoch(self) -> dict:
-        """Run one full pass over the training set."""
-        self.model.train()
         self.loss_meter.reset()
         self.group_tracker.reset()
         self.person_tracker.reset()
 
-        for batch in self.train_loader:
-            # 3-tuple from volleyball_collate
-            x_batch, group_labels, person_labels_list = batch
+        ctx = torch.enable_grad() if train else torch.no_grad()
+        with ctx:
+            for batch in loader:
+                x_batch, group_labels, person_labels_list = batch
+                group_labels = group_labels.to(self.device)
+                batch_loss   = torch.tensor(0.0, device=self.device)
 
-            group_labels = group_labels.to(self.device)   # [B]
-            batch_loss   = torch.tensor(0.0, device=self.device)
+                if self.crops_data:
+                    batch_size = len(x_batch)
+                    for i, (crops, person_labels) in enumerate(
+                        zip(x_batch, person_labels_list)
+                    ):
+                        crops         = crops.to(self.device)
+                        person_labels = person_labels.to(self.device)
+                        batch_loss   += self._forward_sample(crops, group_labels[i], person_labels)
+                else:
+                    x_batch    = x_batch.to(self.device)
+                    batch_size = x_batch.shape[0]
+                    for i, person_labels in enumerate(person_labels_list):
+                        person_labels = person_labels.to(self.device)
+                        batch_loss   += self._forward_sample(x_batch[i], group_labels[i], person_labels)
 
-            if self.crops_data:
-                # x_batch is list[B] of [N_i, T, C, H, W]
-                batch_size = len(x_batch)
-                for i, (crops, person_labels) in enumerate(
-                    zip(x_batch, person_labels_list)
-                ):
-                    crops         = crops.to(self.device)
-                    person_labels = person_labels.to(self.device)
-                    batch_loss    = batch_loss + self._forward_sample(
-                        x             = crops,
-                        group_label   = group_labels[i],
-                        person_labels = person_labels,
-                    )
-            else:
-                # x_batch is Tensor [B, T, C, H, W]
-                x_batch    = x_batch.to(self.device)
-                batch_size = x_batch.shape[0]
-                for i, person_labels in enumerate(person_labels_list):
-                    person_labels = person_labels.to(self.device)
-                    batch_loss    = batch_loss + self._forward_sample(
-                        x             = x_batch[i],   # [T, C, H, W]
-                        group_label   = group_labels[i],
-                        person_labels = person_labels,
-                    )
+                batch_loss = batch_loss / batch_size
 
-            batch_loss = batch_loss / batch_size
+                if train:
+                    self.optimizer.zero_grad()
+                    batch_loss.backward()
+                    if self.grad_clip > 0:
+                        nn.utils.clip_grad_norm_(
+                            self.model.parameters(), self.grad_clip
+                        )
+                    self.optimizer.step()
 
-            self.optimizer.zero_grad()
-            batch_loss.backward()
-            self.optimizer.step()
-
-            self.loss_meter.update(batch_loss.item(), n=batch_size)
+                self.loss_meter.update(batch_loss.item(), n=batch_size)
 
         return {
             "loss":            self.loss_meter.avg,
@@ -205,23 +207,67 @@ class Trainer:
             "person_accuracy": self.person_tracker.accuracy(),
         }
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def train_epoch(self) -> dict:
+        """Run one full training epoch."""
+        return self._run_loader(self.train_loader, train=True)
+
+    def validate(self) -> dict:
+        """Run one full validation pass (no gradients)."""
+        if self.val_loader is None:
+            return {}
+        return self._run_loader(self.val_loader, train=False)
+
+    def _save_checkpoint(self, epoch: int, tag: str) -> Path:
+        """Save full checkpoint (model + optimizer state + metadata)."""
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        path = self.checkpoint_dir / f"{self.model_name}_stage{self.stage}_{tag}.pt"
+        torch.save(
+            {
+                "epoch":     epoch,
+                "stage":     self.stage,
+                "model":     self.model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+            },
+            path,
+        )
+        return path
+
     def train(self) -> None:
-        """Train for num_epochs epochs."""
+        """Train for num_epochs epochs, validate each epoch, save best model."""
         print("\n" + "=" * 70)
-        print("STARTING TRAINING")
+        print(f"STARTING TRAINING  —  stage {self.stage}  —  device: {self.device}")
         print("=" * 70)
 
         for epoch in range(self.num_epochs):
-            metrics = self.train_epoch()
+            train_metrics = self.train_epoch()
+            val_metrics   = self.validate()
 
+            # ── save best model based on val group accuracy ───────────────
+            val_acc = val_metrics.get("group_accuracy", 0.0)
+            if val_acc > self.best_val_group_acc:
+                self.best_val_group_acc = val_acc
+                best_path = self._save_checkpoint(epoch + 1, "best")
+                print(f"  ✔ New best val accuracy: {val_acc*100:.2f}%  → {best_path.name}")
+
+            # ── periodic console logging ──────────────────────────────────
             if (epoch + 1) % self.log_every == 0:
                 msg = (
                     f"Epoch [{epoch+1:>4}/{self.num_epochs}]  "
-                    f"Loss: {metrics['loss']:.4f}  "
-                    f"Group Acc: {metrics['group_accuracy']*100:.2f}%"
+                    f"Loss: {train_metrics['loss']:.4f}  "
+                    f"Train Grp: {train_metrics['group_accuracy']*100:.2f}%"
                 )
                 if self.has_person_loss:
-                    msg += f"  Person Acc: {metrics['person_accuracy']*100:.2f}%"
+                    msg += f"  Train Prs: {train_metrics['person_accuracy']*100:.2f}%"
+                if val_metrics:
+                    msg += f"  Val Grp: {val_metrics['group_accuracy']*100:.2f}%"
                 print(msg)
 
-        print("\n✅ Training completed!")
+        # ── save final checkpoint ─────────────────────────────────────────
+        final_path = self._save_checkpoint(self.num_epochs, "final")
+        print(f"\n✅ Training completed!  Final checkpoint → {final_path.name}")
+        if self.val_loader is not None:
+            print(f"   Best val group accuracy: {self.best_val_group_acc*100:.2f}%")

@@ -127,6 +127,8 @@ class TestFrameDescriptorGradients:
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+        del model
+        torch.cuda.empty_cache()
 
     def test_gradient_flows_to_group_fc(self):
         model = FrameDescriptor(Z_DIM, LSTM_HIDDEN, GROUP_CLASSES)
@@ -138,6 +140,8 @@ class TestFrameDescriptorGradients:
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+        del model
+        torch.cuda.empty_cache()
 
 
 
@@ -160,6 +164,8 @@ class TestFrameDescriptorDevice:
             if param.requires_grad:
                 assert param.grad is not None
                 assert param.grad.device == torch.device(device)
+        del model
+        torch.cuda.empty_cache()
 
 
 
@@ -176,3 +182,5 @@ class TestFrameDescriptorEval:
         logits_2 = model(Z)
 
         assert torch.allclose(logits_1, logits_2, atol=1e-6), "eval mode is not deterministic."
+        del model
+        torch.cuda.empty_cache()

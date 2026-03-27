@@ -1,20 +1,14 @@
-from pathlib import Path
-import sys
 from typing import Callable
+
 import torch
 import torch.nn as nn
-from torchvision import models
+
 from src.models.cnn_backbones import build_alexnet_fc7
+from src.data.labels import PERSON_ACTIONS
 
-from src.config import Config
-# Resolve config path relative to project root
-config_path = Path(__file__).resolve().parent.parent.parent / 'configs' / 'default.yaml'
-cfg = Config.from_yaml(config_path)
-
-PERSON_ACTIONS = cfg.labels.person_actions
-
-
-
+# Defaults match default.yaml — kept here to avoid import-time config loading.
+_DEFAULT_LSTM_HIDDEN_P = 3000
+_DEFAULT_PERSON_CLASSES = 9
 
 
 class PersonEmbedder(nn.Module):
@@ -33,20 +27,19 @@ class PersonEmbedder(nn.Module):
 
     Input  : x  [N, T, C, H, W]
     Output :
-        person_logits  [N, 9]       supervised by individual action labels
-        P              [N, T, D+H]  fused embedding at every timestep
+        person_logits  [N, num_person_classes]   auxiliary supervision
+        P              [N, T, D+H]               fused embedding at every timestep
     """
 
     def __init__(
         self,
-        feature_extractor: Callable[[], tuple[nn.Module, int]] = build_alexnet_fc7,          
-        lstm_hidden:     int = 512,
-        person_classes:  int = len(PERSON_ACTIONS),
+        feature_extractor: Callable[[], tuple[nn.Module, int]] = build_alexnet_fc7,
+        lstm_hidden:     int = _DEFAULT_LSTM_HIDDEN_P,
+        person_classes:  int = _DEFAULT_PERSON_CLASSES,
         n_layers:        int = 1,
     ):
         super().__init__()
         self.cnn, cnn_out_dim = feature_extractor()
-
 
         self.lstm = nn.LSTM(
             input_size  = cnn_out_dim,
@@ -63,20 +56,25 @@ class PersonEmbedder(nn.Module):
     def forward(self, x: torch.Tensor):
         """
         x : [N, T, C, H, W]
+
+        Returns
+        -------
+        person_logits : [N, person_classes]
+        P             : [N, T, D+H]
         """
         N, T, C, H, W = x.shape
 
         # CNN — one crop at a time, no temporal awareness
         cnn_out = self.cnn(x.view(N * T, C, H, W))   # [N*T, D]
-        cnn_out = cnn_out.view(N, T, self.cnn_dim)    # [N,   T, D]
+        cnn_out = cnn_out.view(N, T, self.cnn_dim)    # [N, T, D]
 
         # LSTM1 — one person sequence at a time (shared weights across persons)
-        lstm_out, _ = self.lstm(cnn_out)   # [N, T, H]
+        lstm_out, _ = self.lstm(cnn_out)               # [N, T, H]
 
         # P_{t,k} = x_{t,k} ⊕ h_{t,k}  at every t  (Eq. 7)
-        P = torch.cat([cnn_out, lstm_out], dim=-1)    # [N, T, D+H]
+        P = torch.cat([cnn_out, lstm_out], dim=-1)     # [N, T, D+H]
 
-        # Person-action head — supervised at last timestep
-        person_logits = self.person_fc(P[:, -1, :])   # [N, 9]
+        # Person-action head — supervised at last timestep only
+        person_logits = self.person_fc(P[:, -1, :])    # [N, person_classes]
 
         return person_logits, P

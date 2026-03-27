@@ -15,7 +15,7 @@ N, T, C, H, W = 12, 9, 3, 224, 224
 NUM_CLASSES = 8
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def sample_crops():
     return torch.randn(N, T, C, H, W)
 
@@ -27,6 +27,8 @@ class TestB2B3Shapes:
         model = model_cls(num_classes=NUM_CLASSES, backbone_fn=backbone_fn)
         logits = model(sample_crops)
         assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
     def test_variable_N(self, sample_crops):
         model = B2_PersonClassifier(num_classes=NUM_CLASSES)
@@ -34,6 +36,8 @@ class TestB2B3Shapes:
             x = torch.randn(n, T, C, H, W)
             logits = model(x)
             assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
 
 class TestB2B3Gradients:
@@ -46,6 +50,8 @@ class TestB2B3Gradients:
 
         for name, param in model.classifier.named_parameters():
             assert param.grad is not None and param.grad.abs().sum() > 0
+        del model
+        torch.cuda.empty_cache()
 
 
 # For B3 specifically (fine-tuned)
@@ -61,3 +67,5 @@ class TestB3Gradients:
         has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 
                       for p in model.backbone.parameters())
         assert has_grad
+        del model
+        torch.cuda.empty_cache()

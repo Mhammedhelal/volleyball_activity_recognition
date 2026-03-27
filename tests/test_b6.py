@@ -12,11 +12,11 @@ from src.models.baselines.b6_no_lstm1 import B6_NoPersonLSTM
 from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large
 
 
-N, T, C, H, W = 12, 9, 3, 224, 224
+N, T, C, H, W = 4, 5, 3, 64, 64
 NUM_CLASSES = 8
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def sample_crops():
     return torch.randn(N, T, C, H, W)
 
@@ -29,6 +29,8 @@ class TestB6Shapes:
         model = B6_NoPersonLSTM(num_classes=NUM_CLASSES, backbone_fn=backbone_fn, pool=pool)
         logits = model(sample_crops)
         assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
     def test_variable_N(self, sample_crops):
         model = B6_NoPersonLSTM(num_classes=NUM_CLASSES)
@@ -36,6 +38,8 @@ class TestB6Shapes:
             x = torch.randn(n, T, C, H, W)
             logits = model(x)
             assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
 
 class TestB6Gradients:
@@ -59,6 +63,8 @@ class TestB6Gradients:
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+        del model
+        torch.cuda.empty_cache()
 
     @pytest.mark.parametrize("backbone_fn", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_gradient_flows_to_backbone(self, backbone_fn):
@@ -75,6 +81,8 @@ class TestB6Gradients:
                 has_grad = True
                 break
         assert has_grad, "No gradients flowed to backbone (expected since freeze=False)"
+        del model
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
@@ -88,6 +96,8 @@ class TestB6Device:
 
         loss = logits.sum()
         loss.backward()
+        del model
+        torch.cuda.empty_cache()
 
 
 class TestB6Eval:
@@ -101,4 +111,6 @@ class TestB6Eval:
         out1 = model(x)
         out2 = model(x)
         assert torch.allclose(out1, out2, atol=1e-6), "Eval mode is not deterministic"
+        del model
+        torch.cuda.empty_cache()
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     

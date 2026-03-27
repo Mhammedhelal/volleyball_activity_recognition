@@ -6,6 +6,7 @@ Shared helper functions used by both scripts/train.py and scripts/evaluate.py.
 
 import inspect
 import random
+from collections import Counter
 from functools import partial
 from pathlib import Path
 from typing import List
@@ -24,6 +25,167 @@ from src.models.cnn_backbones import (
 )
 from src.models.hierarchical_model import HierarchicalGroupActivityModel
 from src.models.baselines import BASELINES
+
+
+# ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
+
+def validate_config(cfg: Config) -> None:
+    """
+    Validate the config before any training/evaluation starts.
+    Raises ValueError with a clear message on the first problem found.
+    """
+    errors = []
+
+    # Label lengths
+    if len(cfg.labels.group_activities) != cfg.labels.num_group_classes:
+        errors.append(
+            f"labels.group_activities has {len(cfg.labels.group_activities)} entries "
+            f"but num_group_classes={cfg.labels.num_group_classes}"
+        )
+    if len(cfg.labels.person_actions) != cfg.labels.num_person_classes:
+        errors.append(
+            f"labels.person_actions has {len(cfg.labels.person_actions)} entries "
+            f"but num_person_classes={cfg.labels.num_person_classes}"
+        )
+
+    # Pooling strategy
+    if cfg.pooling.strategy not in ("max", "avg"):
+        errors.append(
+            f"pooling.strategy must be 'max' or 'avg', got '{cfg.pooling.strategy}'"
+        )
+
+    # Num subgroups
+    if cfg.pooling.num_subgroups not in (1, 2, 4):
+        errors.append(
+            f"pooling.num_subgroups must be 1, 2, or 4, got {cfg.pooling.num_subgroups}"
+        )
+
+    # Temporal window must be odd
+    if cfg.dataset.num_frames % 2 == 0:
+        errors.append(
+            f"dataset.num_frames must be odd, got {cfg.dataset.num_frames}"
+        )
+
+    # Device
+    device = getattr(cfg.training, "device", "cpu")
+    if device == "cuda" and not torch.cuda.is_available():
+        errors.append(
+            "training.device='cuda' but CUDA is not available on this machine. "
+            "Set training.device='cpu' or run on a GPU node."
+        )
+
+    if errors:
+        msg = "\n".join(f"  • {e}" for e in errors)
+        raise ValueError(f"Config validation failed:\n{msg}")
+
+    print("✔  Config validated OK")
+
+
+# ---------------------------------------------------------------------------
+# Startup data sanity check
+# ---------------------------------------------------------------------------
+
+def check_data_integrity(data_root: Path, videos: List[int]) -> None:
+    """
+    Lightweight startup check — verifies that each expected video folder
+    exists, has an annotations.txt, and contains at least one .jpg.
+
+    Does NOT exhaustively validate every frame (that would be too slow).
+    Raises FileNotFoundError with a clear message on the first problem.
+    """
+    print(f"\n── Data integrity check ({'─'*40})")
+    missing_dirs   = []
+    missing_ann    = []
+    empty_dirs     = []
+
+    for vid in sorted(videos):
+        vid_dir = data_root / str(vid)
+        if not vid_dir.is_dir():
+            missing_dirs.append(vid)
+            continue
+        ann_file = vid_dir / "annotations.txt"
+        if not ann_file.exists():
+            missing_ann.append(vid)
+            continue
+        jpgs = list(vid_dir.rglob("*.jpg"))
+        if not jpgs:
+            empty_dirs.append(vid)
+
+    problems = []
+    if missing_dirs:
+        problems.append(f"Missing video directories: {missing_dirs}")
+    if missing_ann:
+        problems.append(f"Missing annotations.txt in: {missing_ann}")
+    if empty_dirs:
+        problems.append(f"No .jpg images found in: {empty_dirs}")
+
+    if problems:
+        msg = "\n".join(f"  • {p}" for p in problems)
+        raise FileNotFoundError(
+            f"Data integrity check failed under {data_root}:\n{msg}\n"
+            "Fix the data paths or video IDs in configs/default.yaml."
+        )
+
+    print(f"  ✔  {len(videos)} video(s) verified under {data_root}")
+
+
+# ---------------------------------------------------------------------------
+# Class distribution analysis
+# ---------------------------------------------------------------------------
+
+def log_class_distribution(cfg: Config, videos: List[int], split_name: str) -> None:
+    """
+    Parse annotations for *videos* and print class counts.
+    Helps detect severe class imbalance before training starts.
+    """
+    data_root = Path(cfg.paths.data_root)
+    if not data_root.is_absolute():
+        data_root = Path(__file__).resolve().parent.parent / data_root
+
+    group_counts  = Counter()
+    person_counts = Counter()
+    total_samples = 0
+
+    for vid in videos:
+        ann_file = data_root / str(vid) / "annotations.txt"
+        if not ann_file.exists():
+            continue
+        with open(ann_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                tokens      = line.split()
+                group_label = tokens[1]
+                group_counts[group_label] += 1
+                total_samples += 1
+                player_tokens = tokens[2:]
+                for i in range(4, len(player_tokens), 5):
+                    person_counts[player_tokens[i]] += 1
+
+    if total_samples == 0:
+        print(f"  ⚠  No samples found for {split_name} split")
+        return
+
+    print(f"\n── {split_name} class distribution ({total_samples} samples) ──────────")
+    print(f"  {'Group Activity':<20} {'Count':>6}  {'%':>6}")
+    print(f"  {'-'*20} {'-'*6}  {'-'*6}")
+    for label in cfg.labels.group_activities:
+        cnt = group_counts.get(label, 0)
+        pct = 100.0 * cnt / total_samples if total_samples else 0
+        flag = "  ⚠ rare" if pct < 5 else ""
+        print(f"  {label:<20} {cnt:>6}  {pct:>5.1f}%{flag}")
+
+    print(f"\n  {'Person Action':<20} {'Count':>7}")
+    print(f"  {'-'*20} {'-'*7}")
+    total_persons = sum(person_counts.values())
+    for label in cfg.labels.person_actions:
+        cnt = person_counts.get(label, 0)
+        pct = 100.0 * cnt / total_persons if total_persons else 0
+        flag = "  ⚠ rare" if pct < 3 else ""
+        print(f"  {label:<20} {cnt:>7}  {pct:>5.1f}%{flag}")
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +240,13 @@ def get_backbone_fn(backbone_name: str):
         "resnet50":           build_resnet50,
         "mobilenet_v3_large": build_mobilenet_v3_large,
     }
-    return backbone_map.get(backbone_name, build_alexnet_fc7)
+    fn = backbone_map.get(backbone_name)
+    if fn is None:
+        raise ValueError(
+            f"Unknown backbone '{backbone_name}'. "
+            f"Choices: {list(backbone_map.keys())}"
+        )
+    return fn
 
 
 # ---------------------------------------------------------------------------
@@ -106,16 +274,6 @@ def build_baseline_model(
     pool:         str | None = None,
     lstm_hidden:  int | None = None,
 ) -> object:
-    """
-    Instantiate a baseline model from its registry key.
-
-    Parameters
-    ----------
-    cfg          : Config
-    baseline_key : str  e.g. "B1", "B7"
-    pool         : optional pooling override ("max" | "avg")
-    lstm_hidden  : optional LSTM hidden-size override
-    """
     key = baseline_key.upper()
     if key not in BASELINES:
         raise ValueError(
@@ -152,19 +310,6 @@ def build_loader(
     batch_size: int,
     crops_data: bool,
 ) -> DataLoader:
-    """
-    Build a DataLoader for the given video split.
-
-    Parameters
-    ----------
-    cfg        : Config
-    videos     : list of video IDs to include
-    transform  : torchvision transform pipeline
-    shuffle    : whether to shuffle samples
-    batch_size : samples per batch
-    crops_data : True  → dataset yields [N,T,C,H,W] crops (B2/B3/B5/B6/B7/full)
-                 False → dataset yields [T,C,H,W] full frames (B1/B4)
-    """
     data_root = Path(cfg.paths.data_root)
     if not data_root.is_absolute():
         project_root = Path(__file__).resolve().parent.parent
@@ -179,13 +324,16 @@ def build_loader(
         crops_data   = crops_data,
     )
 
+    # Validate crops_data matches model expectation before burning GPU time
+    assert isinstance(crops_data, bool), "crops_data must be a bool"
+
     return DataLoader(
         dataset,
         batch_size  = batch_size,
         shuffle     = shuffle,
         collate_fn  = make_collate_fn(crops_data=crops_data),
         num_workers = cfg.dataset.num_workers,
-        pin_memory  = cfg.dataset.pin_memory,
+        pin_memory  = cfg.dataset.pin_memory and torch.cuda.is_available(),
     )
 
 

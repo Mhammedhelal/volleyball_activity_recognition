@@ -22,11 +22,10 @@ dataset:
   val_videos:   [0, 2, 8, 12, 17, 19, 24, 26, 27, 28, 30, 33, 46, 49, 51]
   test_videos:  [4, 5, 9, 11, 14, 20, 21, 25, 29, 34, 35, 37, 43, 44, 45, 47]
 
-  num_frames: 9
+  num_frames: 9           # must be odd (symmetric temporal window)
   frame_offset: 1
 
   max_players: 12
-  reuse_target_bbox: true
 
   image_size: [224, 224]
   mean: [0.485, 0.456, 0.406]
@@ -40,14 +39,15 @@ dataset:
 # ---------------------------------------------------------------------------
 labels:
   group_activities:
-    - "r_spike"
     - "r_set"
-    - "l_spike"
-    - "l_set"
+    - "r_spike"
     - "r_pass"
-    - "l_pass"
     - "r_winpoint"
     - "l_winpoint"
+    - "l_pass"
+    - "l_spike"
+    - "l_set"
+      
   num_group_classes: 8
 
   person_actions:
@@ -66,7 +66,7 @@ labels:
 # CNN Backbone
 # ---------------------------------------------------------------------------
 cnn:
-  backbone: "alexnet" # resnet50, alexnet, mobilenet_v3_large
+  backbone: "alexnet"   # resnet50 | alexnet | mobilenet_v3_large
   feature_layer: "fc7"
   feature_dim: 4096
   pretrained: true
@@ -100,11 +100,8 @@ pooling:
 # Group-level temporal model  (LSTM2)
 # ---------------------------------------------------------------------------
 group_lstm:
-  fc_input_dim: 14192
-  fc_hidden_dim: 3000
   hidden_dim: 2000
   num_layers: 1
-  num_timesteps: 10
   dropout: 0.0
   bidirectional: false
 
@@ -139,7 +136,7 @@ training:
     momentum: 0.9
     weight_decay: 0.0005
     lr_scheduler: null
-    grad_clip: 5.0
+    grad_clip: 5.0      # max gradient norm — critical for LSTM stability
 
   stage2:
     epochs: 50
@@ -152,7 +149,7 @@ training:
     grad_clip: 5.0
 
   seed: 42
-  device: "cuda"
+  device: "cuda"        # auto-falls back to "cpu" if CUDA unavailable
   mixed_precision: false
   log_every_n_steps: 10
   val_every_n_epochs: 1

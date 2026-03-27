@@ -41,10 +41,26 @@ class MetricsTracker:
     """
     Accumulates per-sample predictions and targets for a named classification
     task, then computes accuracy, per-class accuracy, and confusion matrix.
+
+    Parameters
+    ----------
+    class_names : list[str]
+        Human-readable name for each class — length defines num_classes.
+    num_classes : int
+        Number of output classes.
+
+    NOTE: constructor accepts (class_names, num_classes) in that order so that
+    callers can pass a label list as the first argument, which is the natural
+    usage in trainer.py / evaluator.py:
+
+        MetricsTracker(GROUP_ACTIVITIES, len(GROUP_ACTIVITIES))
     """
 
-    def __init__(self, name: str, num_classes: int) -> None:
-        self.name        = name
+    def __init__(self, class_names: list[str], num_classes: int) -> None:
+        assert len(class_names) == num_classes, (
+            f"class_names length ({len(class_names)}) != num_classes ({num_classes})"
+        )
+        self.class_names = list(class_names)
         self.num_classes = num_classes
         self.reset()
 
@@ -57,21 +73,21 @@ class MetricsTracker:
 
     def update(
         self,
-        pred:   "torch.Tensor | list[int]",
-        target: "torch.Tensor | list[int]",
+        preds:   "torch.Tensor | list[int]",
+        targets: "torch.Tensor | list[int]",
     ) -> None:
-        if isinstance(pred, list):
-            pred = torch.tensor(pred, dtype=torch.long)
-        if isinstance(target, list):
-            target = torch.tensor(target, dtype=torch.long)
+        if isinstance(preds, list):
+            preds = torch.tensor(preds, dtype=torch.long)
+        if isinstance(targets, list):
+            targets = torch.tensor(targets, dtype=torch.long)
 
-        pred   = pred.view(-1).long()
-        target = target.view(-1).long()
+        preds   = preds.view(-1).long()
+        targets = targets.view(-1).long()
 
-        self._predictions.append(pred)
-        self._targets.append(target)
+        self._predictions.append(preds)
+        self._targets.append(targets)
 
-        for p, t in zip(pred, target):
+        for p, t in zip(preds, targets):
             self._confusion[t, p] += 1
 
     # ── scalar metrics ────────────────────────────────────────────────────
@@ -82,15 +98,12 @@ class MetricsTracker:
             return 0.0
         return self._confusion.trace().item() / total
 
-    def per_class_accuracy(self) -> dict:
-        cm    = self._confusion.float()
-        tp    = cm.diag()
+    def per_class_accuracy(self) -> dict[str, float]:
+        cm     = self._confusion.float()
+        tp     = cm.diag()
         totals = cm.sum(dim=1)
-        acc   = tp / totals.clamp(min=1e-8)
-        return {
-            str(i): acc[i].item()
-            for i in range(self.num_classes)
-        }
+        acc    = tp / totals.clamp(min=1e-8)
+        return {self.class_names[i]: acc[i].item() for i in range(self.num_classes)}
 
     def accuracy_per_class(self) -> torch.Tensor:
         cm     = self._confusion.float()
@@ -158,7 +171,7 @@ class MetricsTracker:
         Keys
         ----
         accuracy        : float
-        per_class       : dict[class_name_or_idx, float]
+        per_class       : dict[class_name, float]   ← keyed by name, not index
         correct         : int
         total           : int
         confusion_matrix: Tensor [C, C]
@@ -170,22 +183,21 @@ class MetricsTracker:
         per_class_acc = {}
         for i in range(self.num_classes):
             row_total = cm[i].sum().item()
-            per_class_acc[str(i)] = (
+            per_class_acc[self.class_names[i]] = (
                 cm[i, i].item() / row_total if row_total > 0 else 0.0
             )
 
         return {
-            "accuracy":        correct / total if total > 0 else 0.0,
-            "per_class":       per_class_acc,
-            "correct":         int(correct),
-            "total":           int(total),
+            "accuracy":         correct / total if total > 0 else 0.0,
+            "per_class":        per_class_acc,
+            "correct":          int(correct),
+            "total":            int(total),
             "confusion_matrix": cm.clone(),
         }
 
     def __repr__(self) -> str:
         return (
-            f"MetricsTracker(name='{self.name}', "
-            f"num_classes={self.num_classes}, "
+            f"MetricsTracker(num_classes={self.num_classes}, "
             f"accuracy={self.accuracy():.4f}, "
             f"total={self._confusion.sum().item()})"
         )

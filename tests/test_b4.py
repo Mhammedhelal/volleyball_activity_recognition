@@ -16,7 +16,7 @@ T, C, H, W = 9, 3, 224, 224
 NUM_CLASSES = 8
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def sample_frames():
     return torch.randn(T, C, H, W)
 
@@ -29,6 +29,8 @@ class TestB4Shapes:
         logits = model(sample_frames)
         assert logits.shape == (NUM_CLASSES,)
         assert logits.dim() == 1
+        del model
+        torch.cuda.empty_cache()
 
     def test_variable_T(self, sample_frames):
         model = B4_TemporalImageModel(num_classes=NUM_CLASSES)
@@ -36,6 +38,8 @@ class TestB4Shapes:
             x = torch.randn(t, C, H, W)
             logits = model(x)
             assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
 
 class TestB4Gradients:
@@ -59,6 +63,8 @@ class TestB4Gradients:
             assert param.grad is not None
             assert torch.isfinite(param.grad).all()
             assert param.grad.abs().sum() > 0
+        del model
+        torch.cuda.empty_cache()
 
     @pytest.mark.parametrize("backbone_fn", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_gradient_flows_to_backbone(self, backbone_fn):
@@ -75,6 +81,8 @@ class TestB4Gradients:
                 has_grad = True
                 break
         assert has_grad, "No gradients flowed to backbone (expected since freeze=False)"
+        del model
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
@@ -88,6 +96,8 @@ class TestB4Device:
 
         loss = logits.sum()
         loss.backward()
+        del model
+        torch.cuda.empty_cache()
 
 
 class TestB4Eval:
@@ -100,3 +110,5 @@ class TestB4Eval:
         out1 = model(x)
         out2 = model(x)
         assert torch.allclose(out1, out2, atol=1e-6), "Eval mode is not deterministic"
+        del model
+        torch.cuda.empty_cache()

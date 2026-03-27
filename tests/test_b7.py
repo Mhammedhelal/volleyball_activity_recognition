@@ -12,11 +12,11 @@ from src.models.baselines.b7_no_lstm2 import B7_NoGroupLSTM
 from src.models.cnn_backbones import build_alexnet_fc7
 
 
-N, T, C, H, W = 12, 9, 3, 224, 224
+N, T, C, H, W = 4, 5, 3, 64, 64
 NUM_CLASSES = 8
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def sample_crops():
     return torch.randn(N, T, C, H, W)
 
@@ -27,6 +27,8 @@ class TestB7Shapes:
         model = B7_NoGroupLSTM(num_classes=NUM_CLASSES)
         logits = model(sample_crops)
         assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
     def test_variable_N(self, sample_crops):
         model = B7_NoGroupLSTM(num_classes=NUM_CLASSES)
@@ -34,6 +36,8 @@ class TestB7Shapes:
             x = torch.randn(n, T, C, H, W)
             logits = model(x)
             assert logits.shape == (NUM_CLASSES,)
+        del model
+        torch.cuda.empty_cache()
 
 
 class TestB7Gradients:
@@ -52,3 +56,5 @@ class TestB7Gradients:
         # Classifier
         for name, param in model.classifier.named_parameters():
             assert param.grad is not None and param.grad.abs().sum() > 0
+        del model
+        torch.cuda.empty_cache()

@@ -190,6 +190,8 @@ class TestPersonEmbedderGradients:
             assert param.grad is not None, f"No gradient for {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
             assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+        del model
+        torch.cuda.empty_cache()
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_no_gradient_in_cnn(self, feature_extractor):
@@ -203,6 +205,8 @@ class TestPersonEmbedderGradients:
             assert param.grad is None, (
                 f"Unexpected gradient in frozen CNN param '{name}'"
             )
+        del model
+        torch.cuda.empty_cache()
 
 
 

@@ -1,26 +1,18 @@
-from pathlib import Path
-import sys
-
 import torch
 import torch.nn as nn
 
-from src.config import Config
+# Constants that must match default.yaml — kept here to avoid import-time
+# config loading (which breaks if the config path moves).
+_DEFAULT_LSTM_HIDDEN_G = 2000
+_DEFAULT_GROUP_CLASSES  = 8
 
-# Resolve config path relative to project root
-config_path = Path(__file__).resolve().parent.parent.parent / 'configs' / 'default.yaml'
-cfg = Config.from_yaml(config_path)
-LSTM_HIDDEN_G = cfg.group_lstm.hidden_dim
-
-GROUP_ACTIVITIES = cfg.labels.group_activities
-#[
-#     "l_set", "l_spike", "l_pass", "l_winpoint",
-#     "r_set", "r_spike", "r_pass", "r_winpoint",
-# ]  # 8 classes
+# Imported for use by hierarchical_model.py / models/__init__.py
+from src.data.labels import GROUP_ACTIVITIES
 
 
 class FrameDescriptor(nn.Module):
     """
-    Stage 2 — Group-level temporal model (Section 3.2).
+    Stage 2b — Group-level temporal model (Section 3.2).
 
     Receives the full T-length sequence of frame descriptors Z_1 … Z_T
     and models how the group activity evolves over time.
@@ -35,8 +27,8 @@ class FrameDescriptor(nn.Module):
     def __init__(
         self,
         z_dim:         int,
-        lstm_hidden:   int = LSTM_HIDDEN_G,
-        group_classes: int = len(GROUP_ACTIVITIES),   # 8
+        lstm_hidden:   int = _DEFAULT_LSTM_HIDDEN_G,
+        group_classes: int = _DEFAULT_GROUP_CLASSES,
         n_layers:      int = 1,
     ):
         super().__init__()
@@ -55,9 +47,9 @@ class FrameDescriptor(nn.Module):
         Z : [1, T, z_dim]
 
         Returns
-          group_logits : [8]
+          group_logits : [group_classes]
         """
-        lstm_out, _  = self.group_lstm(Z)          # [1, T, lstm_hidden]
-        h_group      = lstm_out[0, -1, :]          # [lstm_hidden]  last hidden state
-        group_logits = self.group_fc(h_group)      # [8]
+        lstm_out, _  = self.group_lstm(Z)       # [1, T, lstm_hidden]
+        h_group      = lstm_out[0, -1, :]       # [lstm_hidden]  last hidden state
+        group_logits = self.group_fc(h_group)   # [group_classes]
         return group_logits

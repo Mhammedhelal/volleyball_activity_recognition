@@ -1,18 +1,14 @@
-from pathlib import Path
-import sys
 from torchvision import transforms
 
-from src.config import Config
-
-# Resolve config path relative to project root
-config_path = Path(__file__).resolve().parent.parent.parent / 'configs' / 'default.yaml'
-cfg = Config.from_yaml(config_path)
-IMAGE_SIZE =  cfg.dataset.image_size
-
-IMAGENET_MEAN = cfg.dataset.mean
-IMAGENET_STD  = cfg.dataset.std
+# ImageNet defaults — hardcoded to avoid import-time config dependency.
+# These match default.yaml exactly and should not change between experiments.
+IMAGE_SIZE    = (224, 224)
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 # -- Training transforms ------------------------------------------------------
+# NOTE: RandomHorizontalFlip is intentionally omitted — flipping reverses
+# left/right team assignments, corrupting group-activity labels.
 train_transforms = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.ColorJitter(
@@ -25,9 +21,9 @@ train_transforms = transforms.Compose([
     transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
 ])
 
-# -- Validation / Test transforms ------------------------------------------------------
+# -- Validation / Test transforms ---------------------------------------------
 eval_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize(IMAGE_SIZE),
     transforms.ToTensor(),
     transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
 ])

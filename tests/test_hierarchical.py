@@ -2,13 +2,6 @@
 tests/test_hierarchical.py
 --------------------------
 Integration tests for HierarchicalGroupActivityModel.
-
-These tests treat the full model as a black box and verify:
-  - output shapes
-  - output types
-  - gradient flow end-to-end
-  - stage-1 freeze behaviour
-  - subgroup configuration variants
 """
 
 import sys
@@ -23,7 +16,7 @@ from src.models.cnn_backbones import build_alexnet_fc7, build_resnet50, build_mo
 
 
 # ─────────────────────────────────────────────
-# Constants — paper hyperparameters (small for tests)
+# Constants
 # ─────────────────────────────────────────────
 
 CNN_DIM       = 4096
@@ -31,7 +24,7 @@ LSTM_HIDDEN_P = 512
 LSTM_HIDDEN_G = 512
 PERSON_CLS    = 9
 GROUP_CLS     = 8
-N, T, C, H, W = 12, 9, 3, 224, 224
+N, T, C, H, W = 4, 5, 3, 64, 64
 
 
 @pytest.fixture(scope="module")
@@ -60,15 +53,11 @@ class TestHierarchicalShapes:
 
     def test_group_logits_shape(self, model, sample):
         group_logits, _ = model(sample)
-        assert group_logits.shape == (GROUP_CLS,), (
-            f"Expected [{GROUP_CLS}], got {group_logits.shape}"
-        )
+        assert group_logits.shape == (GROUP_CLS,)
 
     def test_person_logits_shape(self, model, sample):
         _, person_logits = model(sample)
-        assert person_logits.shape == (N, PERSON_CLS), (
-            f"Expected [{N}, {PERSON_CLS}], got {person_logits.shape}"
-        )
+        assert person_logits.shape == (N, PERSON_CLS)
 
     def test_group_logits_1d(self, model, sample):
         group_logits, _ = model(sample)
@@ -116,26 +105,23 @@ class TestHierarchicalValues:
 
     def test_group_logits_finite(self, model, sample):
         group_logits, _ = model(sample)
-        assert torch.isfinite(group_logits).all(), "group_logits contains NaN or Inf"
+        assert torch.isfinite(group_logits).all()
 
     def test_person_logits_finite(self, model, sample):
         _, person_logits = model(sample)
-        assert torch.isfinite(person_logits).all(), "person_logits contains NaN or Inf"
+        assert torch.isfinite(person_logits).all()
 
     def test_group_softmax_sums_to_one(self, model, sample):
         group_logits, _ = model(sample)
         prob_sum = group_logits.softmax(dim=-1).sum().item()
-        assert abs(prob_sum - 1.0) < 1e-5, f"Softmax sum: {prob_sum}"
+        assert abs(prob_sum - 1.0) < 1e-5
 
     def test_different_inputs_give_different_outputs(self, model):
-        """Model must not return constant output regardless of input."""
         x1 = torch.randn(N, T, C, H, W)
         x2 = torch.randn(N, T, C, H, W)
         g1, _ = model(x1)
         g2, _ = model(x2)
-        assert not torch.allclose(g1, g2), (
-            "Different inputs produced identical group logits"
-        )
+        assert not torch.allclose(g1, g2)
 
 
 # ─────────────────────────────────────────────
@@ -146,50 +132,47 @@ class TestHierarchicalGradients:
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_group_loss_grad_reaches_lstm2(self, feature_extractor):
-        """Group-activity loss must flow back to LSTM2 (group_lstm) weights."""
         model = HierarchicalGroupActivityModel(
-            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P,
+            lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
         group_logits, _ = model(torch.randn(N, T, C, H, W))
         group_logits.sum().backward()
 
         for name, param in model.person_embedder.lstm.named_parameters():
-            assert param.grad is not None, f"No gradient for {name}"
-            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
-            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+            assert param.grad is not None
+            assert torch.isfinite(param.grad).all()
+            assert param.grad.abs().sum() > 0
 
         for name, param in model.frame_descriptor.group_lstm.named_parameters():
-            assert param.grad is not None, f"No gradient for {name}"
-            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
-            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+            assert param.grad is not None
+            assert torch.isfinite(param.grad).all()
+            assert param.grad.abs().sum() > 0
+        del model
+        torch.cuda.empty_cache()
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_person_loss_grad_reaches_lstm1(self, feature_extractor):
-        """Person-action loss must flow back to LSTM1 (person_embedder.lstm)."""
         model = HierarchicalGroupActivityModel(
-            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P,
+            lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
         _, person_logits = model(torch.randn(N, T, C, H, W))
         person_logits.sum().backward()
 
         for name, param in model.person_embedder.lstm.named_parameters():
-            assert param.grad is not None, f"No gradient for {name}"
-            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
-            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
-
-        for name, param in model.frame_descriptor.group_lstm.named_parameters():
-            assert param.grad is not None, f"No gradient for {name}"
-            assert torch.isfinite(param.grad).all(), f"Non-finite gradient for {name}"
-            assert param.grad.abs().sum() > 0, f"Zero gradient for {name}"
+            assert param.grad is not None
+            assert torch.isfinite(param.grad).all()
+            assert param.grad.abs().sum() > 0
+        del model
+        torch.cuda.empty_cache()
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_stage2_freeze_blocks_person_embedder_grad(self, feature_extractor):
-        """After freezing person_embedder, group loss must NOT update its weights."""
         m = HierarchicalGroupActivityModel(
-            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P,
+            lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
-
-        # Simulate stage-2 freeze (as done in train.py)
         for param in m.person_embedder.parameters():
             param.requires_grad = False
 
@@ -200,12 +183,14 @@ class TestHierarchicalGradients:
             assert param.grad is None, (
                 f"Gradient leaked into frozen person_embedder param '{name}'"
             )
+        del m
+        torch.cuda.empty_cache()
 
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_stage2_freeze_still_trains_lstm2(self, feature_extractor):
-        """After freezing person_embedder, LSTM2 must still receive gradients."""
         m = HierarchicalGroupActivityModel(
-            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P,
+            lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
         )
         for param in m.person_embedder.parameters():
             param.requires_grad = False
@@ -214,18 +199,20 @@ class TestHierarchicalGradients:
         group_logits.sum().backward()
 
         for name, param in m.frame_descriptor.group_lstm.named_parameters():
-            assert param.grad is not None and param.grad.abs().sum() > 0, (
-                f"LSTM2 param '{name}' has no gradient after stage-2 freeze"
-            )
-
+            assert param.grad is not None and param.grad.abs().sum() > 0
+        del m
+        torch.cuda.empty_cache()
 
 
 # ─────────────────────────────────────────────
-# Device Consistency tests
+# Device tests  — compare torch.device objects, not str vs device
 # ─────────────────────────────────────────────
-@pytest.mark.parametrize("device", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
+
+@pytest.mark.parametrize("device_str", ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"])
 class TestHierarchicalDevice:
-    def test_forward_backward(self, device):
+
+    def test_forward_backward(self, device_str):
+        device = torch.device(device_str)
         x = torch.randn(N, T, C, H, W, device=device)
         model = HierarchicalGroupActivityModel(
             feature_extractor=build_alexnet_fc7,
@@ -235,29 +222,41 @@ class TestHierarchicalDevice:
         ).to(device)
 
         g_logits, p_logits = model(x)
-        assert g_logits.device == device
-        assert p_logits.device == device
-        
+
+        # Compare torch.device objects — not str vs torch.device
+        assert g_logits.device.type == device.type
+        assert p_logits.device.type == device.type
+
+        loss = g_logits.sum() + p_logits.sum()
+        loss.backward()
+
         for param in model.parameters():
             if param.requires_grad:
-                assert param.grad.device == device
+                assert param.grad is not None
+                assert param.grad.device.type == device.type
+        del model
+        torch.cuda.empty_cache()
 
 
 # ─────────────────────────────────────────────
-# eval mode determinism tests
+# Eval mode determinism
 # ─────────────────────────────────────────────
+
 class TestHierarchicalEval:
+
     @pytest.mark.parametrize("feature_extractor", [build_alexnet_fc7, build_resnet50, build_mobilenet_v3_large])
     def test_eval_mode_determinism(self, feature_extractor):
         model = HierarchicalGroupActivityModel(
-            feature_extractor=feature_extractor, lstm_hidden_p=LSTM_HIDDEN_P, lstm_hidden_g=LSTM_HIDDEN_G, n_subgroups=2
+            feature_extractor=feature_extractor,
+            lstm_hidden_p=LSTM_HIDDEN_P,
+            lstm_hidden_g=LSTM_HIDDEN_G,
+            n_subgroups=2,
         )
-        x     = torch.randn(4, T, C, H, W)
+        x = torch.randn(4, T, C, H, W)
         model.eval()
-        group_logits_1, person_logits_1 = model(x)
-        group_logits_2, person_logits_2 = model(x)
-
-        assert torch.allclose(group_logits_1, group_logits_2, atol=1e-6) \
-        and torch.allclose(person_logits_1, person_logits_2, atol=1e-6), "eval mode is not deterministic."
-
-    
+        g1, p1 = model(x)
+        g2, p2 = model(x)
+        assert torch.allclose(g1, g2, atol=1e-6)
+        assert torch.allclose(p1, p2, atol=1e-6)
+        del model
+        torch.cuda.empty_cache()
