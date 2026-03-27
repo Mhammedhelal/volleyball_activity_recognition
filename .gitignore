@@ -7,7 +7,3 @@ venv/
 env/
 .venv/
 
-# Outputs
-outputs/
-
-data/

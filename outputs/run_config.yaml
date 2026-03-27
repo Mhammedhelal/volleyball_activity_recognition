@@ -1,0 +1,132 @@
+paths:
+  data_root: /home/mohammed/dev/ML_Diploma/volleyball_activity_recognition/data/videos_g10
+  output_dir: outputs
+  checkpoint_dir: outputs/checkpoints
+  log_dir: outputs/logs
+  figures_dir: outputs/figures
+dataset:
+  train_videos:
+  - 45
+  - 46
+  - 47
+  - 48
+  val_videos:
+  - 49
+  test_videos: []
+  num_frames: 9
+  frame_offset: 1
+  max_players: 12
+  reuse_target_bbox: true
+  image_size:
+  - 224
+  - 224
+  mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  std:
+  - 0.229
+  - 0.224
+  - 0.225
+  num_workers: 4
+  pin_memory: true
+labels:
+  group_activities:
+  - r_spike
+  - r_set
+  - l-spike
+  - l_set
+  - r-pass
+  - l-pass
+  - r_winpoint
+  - l_winpoint
+  num_group_classes: 8
+  person_actions:
+  - waiting
+  - setting
+  - digging
+  - falling
+  - spiking
+  - blocking
+  - jumping
+  - moving
+  - standing
+  num_person_classes: 9
+cnn:
+  backbone: alexnet
+  feature_layer: fc7
+  feature_dim: 4096
+  pretrained: true
+  freeze: false
+person_lstm:
+  input_dim: 4096
+  hidden_dim: 3000
+  num_layers: 1
+  dropout: 0.0
+  bidirectional: false
+person_embedding:
+  dim: 7096
+pooling:
+  num_subgroups: 2
+  strategy: max
+  frame_dim: 14192
+group_lstm:
+  fc_input_dim: 14192
+  fc_hidden_dim: 3000
+  hidden_dim: 2000
+  num_layers: 1
+  num_timesteps: 10
+  dropout: 0.0
+  bidirectional: false
+classifier:
+  group:
+    in_dim: 2000
+    num_classes: 8
+  person:
+    in_dim: 3000
+    num_classes: 9
+loss:
+  group_weight: 1.0
+  person_weight: 1.0
+  label_smoothing: 0.0
+training:
+  stage1:
+    epochs: 50
+    batch_size: 8
+    optimizer: sgd
+    lr: 1.0e-05
+    momentum: 0.9
+    weight_decay: 0.0005
+    lr_scheduler: null
+    grad_clip: 5.0
+  stage2:
+    epochs: 50
+    batch_size: 8
+    optimizer: sgd
+    lr: 1.0e-05
+    momentum: 0.9
+    weight_decay: 0.0005
+    lr_scheduler: null
+    grad_clip: 5.0
+  seed: 42
+  device: cuda
+  mixed_precision: false
+  log_every_n_steps: 10
+  val_every_n_epochs: 1
+  save_every_n_epochs: 5
+  early_stopping_patience: 20
+evaluation:
+  batch_size: 16
+  metrics:
+  - accuracy
+  - confusion_matrix
+  - per_class_accuracy
+  checkpoint: best
+testing:
+  tests_dir: tests
+  module_under_test:
+    test_dataset.py: VolleyballDataset / volleyball_collate
+    test_person_embedder.py: PersonEmbedder
+    test_subgroup_pooler.py: SubGroupPooler / make_subgroup_indices
+    test_frame_descriptor.py: FrameDescriptor
+    test_hierarchical.py: HierarchicalGroupActivityModel
