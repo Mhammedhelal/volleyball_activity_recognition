@@ -124,55 +124,23 @@ class Trainer:
         # ── best-model tracking ───────────────────────────────────────────
         self.best_val_group_acc = 0.0
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
-    def _forward_sample(
-        self,
-        x:             torch.Tensor,
-        group_label:   torch.Tensor,
-        person_labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """Forward one sample, compute combined loss, update trackers."""
-        if self.has_person_loss:
-            group_logits, person_logits = self.model(x)
-        else:
-            group_logits  = self.model(x)
-            person_logits = None
+    def train_epoch(self, loader=None, train: bool = True) -> dict:
+        """
+        Run one full pass over *loader*.
 
-        g_label = group_label.view(1) if group_label.dim() == 0 else group_label
-        loss = self.criterion_group(
-            group_logits.unsqueeze(0),
-            g_label,
-        )
+        train=True  -> backprop + optimizer step (used for the training loader)
+        train=False -> no_grad pass, no optimizer step (used for validation)
 
-        if self.has_person_loss and person_logits is not None:
-            loss = loss + self.person_loss_w * self.criterion_players(
-                person_logits,
-                person_labels,
-            )
+        If *loader* is omitted, defaults to self.train_loader / self.val_loader
+        based on *train*.
+        """
+        if loader is None:
+            loader = self.train_loader if train else self.val_loader
+        if loader is None:
+            return {}
 
-        with torch.no_grad():
-            self.group_tracker.update(
-                preds   = group_logits.argmax().unsqueeze(0),
-                targets = g_label,
-            )
-            if self.has_person_loss and person_logits is not None:
-                self.person_tracker.update(
-                    preds   = person_logits.argmax(dim=-1),
-                    targets = person_labels,
-                )
-
-        return loss
-
-    def _run_loader(self, loader, train: bool) -> dict:
-        """Run one full pass over *loader*. Backprop only when train=True."""
-        if train:
-            self.model.train()
-        else:
-            self.model.eval()
-
+        self.model.train() if train else self.model.eval()
         self.loss_meter.reset()
         self.group_tracker.reset()
         self.person_tracker.reset()
@@ -182,22 +150,40 @@ class Trainer:
             for batch in loader:
                 x_batch, group_labels, person_labels_list = batch
                 group_labels = group_labels.to(self.device)
-                batch_loss   = torch.tensor(0.0, device=self.device)
 
                 if self.crops_data:
                     batch_size = len(x_batch)
-                    for i, (crops, person_labels) in enumerate(
-                        zip(x_batch, person_labels_list)
-                    ):
-                        crops         = crops.to(self.device)
-                        person_labels = person_labels.to(self.device)
-                        batch_loss   += self._forward_sample(crops, group_labels[i], person_labels)
                 else:
-                    x_batch    = x_batch.to(self.device)
+                    x_batch = x_batch.to(self.device)
                     batch_size = x_batch.shape[0]
-                    for i, person_labels in enumerate(person_labels_list):
-                        person_labels = person_labels.to(self.device)
-                        batch_loss   += self._forward_sample(x_batch[i], group_labels[i], person_labels)
+
+                batch_loss = torch.tensor(0.0, device=self.device)
+
+                for i, (x, person_labels) in enumerate(zip(x_batch, person_labels_list)):
+                    x             = x.to(self.device)
+                    person_labels = person_labels.to(self.device)
+                    group_label   = group_labels[i].view(1)
+
+                    if self.has_person_loss:
+                        group_logits, person_logits = self.model(x)
+                    else:
+                        group_logits, person_logits = self.model(x), None
+
+                    loss = self.criterion_group(group_logits.unsqueeze(0), group_label)
+                    if self.has_person_loss and person_logits is not None:
+                        loss = loss + self.person_loss_w * self.criterion_players(
+                            person_logits, person_labels
+                        )
+                    batch_loss = batch_loss + loss
+
+                    with torch.no_grad():
+                        self.group_tracker.update(
+                            preds=group_logits.argmax().unsqueeze(0), targets=group_label
+                        )
+                        if self.has_person_loss and person_logits is not None:
+                            self.person_tracker.update(
+                                preds=person_logits.argmax(dim=-1), targets=person_labels
+                            )
 
                 batch_loss = batch_loss / batch_size
 
@@ -205,9 +191,7 @@ class Trainer:
                     self.optimizer.zero_grad()
                     batch_loss.backward()
                     if self.grad_clip > 0:
-                        nn.utils.clip_grad_norm_(
-                            self.model.parameters(), self.grad_clip
-                        )
+                        nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                     self.optimizer.step()
 
                 self.loss_meter.update(batch_loss.item(), n=batch_size)
@@ -218,19 +202,40 @@ class Trainer:
             "person_accuracy": self.person_tracker.accuracy(),
         }
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def train(self) -> None:
+        """Train for num_epochs epochs, validate each epoch, save best model."""
+        print("\n" + "=" * 70)
+        print(f"STARTING TRAINING  —  stage {self.stage}  —  device: {self.device}")
+        print("=" * 70)
 
-    def train_epoch(self) -> dict:
-        """Run one full training epoch."""
-        return self._run_loader(self.train_loader, train=True)
+        for epoch in range(self.num_epochs):
+            train_metrics = self.train_epoch(self.train_loader, train=True)
+            val_metrics   = self.train_epoch(self.val_loader, train=False) \
+                if self.val_loader is not None else {}
 
-    def validate(self) -> dict:
-        """Run one full validation pass (no gradients)."""
-        if self.val_loader is None:
-            return {}
-        return self._run_loader(self.val_loader, train=False)
+            val_acc = val_metrics.get("group_accuracy", 0.0)
+            if val_acc > self.best_val_group_acc:
+                self.best_val_group_acc = val_acc
+                best_path = self._save_checkpoint(epoch + 1, "best")
+                print(f"  ✔ New best val accuracy: {val_acc*100:.2f}%  → {best_path.name}")
+
+            if (epoch + 1) % self.log_every == 0:
+                msg = (
+                    f"Epoch [{epoch+1:>4}/{self.num_epochs}]  "
+                    f"Loss: {train_metrics['loss']:.4f}  "
+                    f"Train Grp: {train_metrics['group_accuracy']*100:.2f}%"
+                )
+                if self.has_person_loss:
+                    msg += f"  Train Prs: {train_metrics['person_accuracy']*100:.2f}%"
+                if val_metrics:
+                    msg += f"  Val Grp: {val_metrics['group_accuracy']*100:.2f}%"
+                print(msg)
+
+        final_path = self._save_checkpoint(self.num_epochs, "final")
+        print(f"\n✅ Training completed!  Final checkpoint → {final_path.name}")
+        if self.val_loader is not None:
+            print(f"   Best val group accuracy: {self.best_val_group_acc*100:.2f}%")
+
 
     def _save_checkpoint(self, epoch: int, tag: str) -> Path:
         """Save full checkpoint (model + optimizer state + metadata)."""
@@ -247,38 +252,3 @@ class Trainer:
         )
         return path
 
-    def train(self) -> None:
-        """Train for num_epochs epochs, validate each epoch, save best model."""
-        print("\n" + "=" * 70)
-        print(f"STARTING TRAINING  —  stage {self.stage}  —  device: {self.device}")
-        print("=" * 70)
-
-        for epoch in range(self.num_epochs):
-            train_metrics = self.train_epoch()
-            val_metrics   = self.validate()
-
-            # ── save best model based on val group accuracy ───────────────
-            val_acc = val_metrics.get("group_accuracy", 0.0)
-            if val_acc > self.best_val_group_acc:
-                self.best_val_group_acc = val_acc
-                best_path = self._save_checkpoint(epoch + 1, "best")
-                print(f"  ✔ New best val accuracy: {val_acc*100:.2f}%  → {best_path.name}")
-
-            # ── periodic console logging ──────────────────────────────────
-            if (epoch + 1) % self.log_every == 0:
-                msg = (
-                    f"Epoch [{epoch+1:>4}/{self.num_epochs}]  "
-                    f"Loss: {train_metrics['loss']:.4f}  "
-                    f"Train Grp: {train_metrics['group_accuracy']*100:.2f}%"
-                )
-                if self.has_person_loss:
-                    msg += f"  Train Prs: {train_metrics['person_accuracy']*100:.2f}%"
-                if val_metrics:
-                    msg += f"  Val Grp: {val_metrics['group_accuracy']*100:.2f}%"
-                print(msg)
-
-        # ── save final checkpoint ─────────────────────────────────────────
-        final_path = self._save_checkpoint(self.num_epochs, "final")
-        print(f"\n✅ Training completed!  Final checkpoint → {final_path.name}")
-        if self.val_loader is not None:
-            print(f"   Best val group accuracy: {self.best_val_group_acc*100:.2f}%")

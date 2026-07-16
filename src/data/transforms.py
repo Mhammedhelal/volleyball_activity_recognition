@@ -7,8 +7,6 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 # -- Training transforms ------------------------------------------------------
-# NOTE: RandomHorizontalFlip is intentionally omitted — flipping reverses
-# left/right team assignments, corrupting group-activity labels.
 train_transforms = transforms.Compose([
     transforms.Resize(IMAGE_SIZE),
     transforms.ColorJitter(
