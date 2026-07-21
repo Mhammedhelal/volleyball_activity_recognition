@@ -30,6 +30,7 @@ from src.engine.trainer import Trainer
 from src.models.baselines import BASELINES
 from src.models.baselines.base import BaselineModel
 from src.utils.checkpointing import save_checkpoint
+from src.utils.embedding_cache import cache_person_embeddings, build_embedding_loader
 from scripts.common import (
     build_baseline_model,
     build_full_model,
@@ -54,6 +55,7 @@ def build_trainer(
     val_loader  = None,
     stage:      int = 1,
     model_name: str = "model",
+    use_precomputed_embeddings=False,
 ) -> Trainer:
     if isinstance(model, BaselineModel):
         return Trainer(
@@ -98,6 +100,7 @@ def build_trainer(
         grad_clip      = stage_cfg.grad_clip,
         model_name     = model_name,
         stage          = stage,
+        use_precomputed_embeddings=use_precomputed_embeddings,
     )
 
 
@@ -117,11 +120,11 @@ def run_stage1(cfg, model, train_loader, val_loader, ckpt_dir, model_name="model
     return ckpt_path
 
 
-def run_stage2(cfg, model, train_loader, val_loader, ckpt_dir, model_name="model") -> Path:
+def run_stage2(cfg, model, train_loader, val_loader, ckpt_dir, model_name="model", use_precomputed_embeddings=False) -> Path:
     print("\n" + "=" * 70)
     print("STAGE 2  —  LSTM2  (group-activity supervision)")
     print("=" * 70)
-    build_trainer(cfg, model, train_loader, val_loader, stage=2, model_name=model_name).train()
+    build_trainer(cfg, model, train_loader, val_loader, stage=2, model_name=model_name, use_precomputed_embeddings=use_precomputed_embeddings).train()
     ckpt_path = ckpt_dir / f"{model_name}_stage2.pt"
     save_checkpoint({"stage": 2, "model": model.state_dict()}, str(ckpt_path))
     return ckpt_path
@@ -270,17 +273,44 @@ def main() -> None:
 
         model = build_full_model(cfg)
 
-        if args.stage == 1:
+        if args.stage is None:
             run_stage1(cfg, model, train_loader, val_loader, ckpt_dir, args.model_name)
-        elif args.stage == 2:
+            run_stage2(cfg, model, train_loader, val_loader, ckpt_dir, args.model_name)
+
+        elif args.stage == 1:
+            run_stage1(cfg, model, train_loader, val_loader, ckpt_dir, args.model_name)
+
+            print("\nCaching Stage-1 person embeddings for Stage-2 …")
+            cache_train_loader = build_loader(          # eval_transforms: deterministic,
+                cfg, train_videos, eval_transforms,     # since person_embedder is now frozen
+                shuffle=False, batch_size=cfg.training.stage1.batch_size,
+                crops_data=True,
+            )
+            emb_dir = Path("outputs/embeddings") / args.model_name
+            n_train = cache_person_embeddings(model, cache_train_loader, device, emb_dir / "train")
+            n_val   = cache_person_embeddings(model, val_loader,          device, emb_dir / "val")
+            print(f"  ✔ Cached {n_train} train / {n_val} val samples → {emb_dir}")
+
+        else:
             if args.stage1_checkpoint:
                 ckpt = torch.load(args.stage1_checkpoint, map_location=device)
                 model.load_state_dict(ckpt.get("model", ckpt))
                 print(f"Loaded stage 1 weights from: {args.stage1_checkpoint}")
-            run_stage2(cfg, model, train_loader, val_loader, ckpt_dir, args.model_name)
-        else:
-            run_stage1(cfg, model, train_loader, val_loader, ckpt_dir, args.model_name)
-            run_stage2(cfg, model, train_loader, val_loader, ckpt_dir, args.model_name)
+
+            emb_dir = Path("outputs/embeddings") / args.model_name
+            print(f"\nLoading cached Stage-1 embeddings from {emb_dir} …")
+            emb_train_loader = build_embedding_loader(
+                emb_dir / "train", batch_size=cfg.training.stage2.batch_size, shuffle=True,
+                num_workers=cfg.dataset.num_workers,
+                pin_memory=cfg.dataset.pin_memory and torch.cuda.is_available(),
+            )
+            emb_val_loader = build_embedding_loader(
+                emb_dir / "val", batch_size=cfg.training.stage2.batch_size, shuffle=False,
+                num_workers=cfg.dataset.num_workers,
+                pin_memory=cfg.dataset.pin_memory and torch.cuda.is_available(),
+            )
+            run_stage2(cfg, model, emb_train_loader, emb_val_loader, ckpt_dir, args.model_name,
+                    use_precomputed_embeddings=True)
 
 
 if __name__ == "__main__":

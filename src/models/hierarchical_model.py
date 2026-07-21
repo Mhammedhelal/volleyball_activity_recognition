@@ -67,34 +67,36 @@ class HierarchicalGroupActivityModel(nn.Module):
             group_classes = group_classes,
             n_layers      = n_layers_g,
         )
-
     def forward(
         self,
-        x:                torch.Tensor,
+        x:                torch.Tensor | None = None,
+        P:                torch.Tensor | None = None,
         subgroup_indices: list[list[int]] | None = None,
     ):
         """
-        x                : [N, T, C, H, W]
-                           N players pre-sorted by bounding-box x-coordinate
-        subgroup_indices : optional override; auto-generated from n_subgroups if None
+        Provide exactly one of:
+            x : [N, T, C, H, W]  raw player crops   — runs person_embedder (CNN+LSTM1)
+            P : [N, T, D+H]      cached Stage-1 output — skips CNN+LSTM1 entirely
 
         Returns
-          group_logits   : [8]
-          person_logits  : [N, 9]
+        group_logits   : [8]
+        person_logits  : [N, 9]
         """
-        N = x.shape[0]
+        assert (x is None) != (P is None), "Pass exactly one of x or P"
+
+        if x is not None:
+            N = x.shape[0]
+            person_logits, P = self.person_embedder(x)         # [N,9], [N,T,D+H]
+        else:
+            N = P.shape[0]
+            # person_embedder is frozen whenever P is cached, so person_fc is the
+            # only op needed to recover person_logits — no CNN/LSTM1 forward pass.
+            person_logits = self.person_embedder.person_fc(P[:, -1, :])
 
         if subgroup_indices is None:
             subgroup_indices = make_subgroup_indices(N, self.n_subgroups)
 
-        # Stage 1
-        person_logits, P = self.person_embedder(x)       # [N,9], [N,T,D+H]
-
-        # Stage 2a
-        Z = self.subgroup_pooler(P, subgroup_indices)    # [1, T, z_dim]
-
-        # Stage 2b
-        group_logits = self.frame_descriptor(Z)          # [8]
+        Z = self.subgroup_pooler(P, subgroup_indices)           # [1, T, z_dim]
+        group_logits = self.frame_descriptor(Z)                 # [8]
 
         return group_logits, person_logits
-

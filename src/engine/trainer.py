@@ -74,6 +74,7 @@ class Trainer:
         checkpoint_dir: str   = "outputs/checkpoints",
         model_name:     str   = "model",
         stage:          int   = 1,
+        use_precomputed_embeddings=False, 
     ):
         # ── device (auto-detect if not provided) ─────────────────────────
         if device is None:
@@ -90,6 +91,7 @@ class Trainer:
         self.checkpoint_dir = Path(checkpoint_dir)
         self.model_name     = model_name
         self.stage          = stage
+        self.use_precomputed_embeddings = use_precomputed_embeddings
 
         # ── model routing flags ───────────────────────────────────────────
         self.input_type      = getattr(model, "INPUT_TYPE",      _DEFAULT_INPUT_TYPE)
@@ -165,9 +167,12 @@ class Trainer:
                     group_label   = group_labels[i].view(1)
 
                     if self.has_person_loss:
-                        group_logits, person_logits = self.model(x)
+                        if self.use_precomputed_embeddings: 
+                            group_logits, person_logits = self.model(P=x)
+                        else:
+                            group_logits, person_logits = self.model(x)
                     else:
-                        group_logits, person_logits = self.model(x), None
+                        group_logits = self.model(x)
 
                     loss = self.criterion_group(group_logits.unsqueeze(0), group_label)
                     if self.has_person_loss and person_logits is not None:
