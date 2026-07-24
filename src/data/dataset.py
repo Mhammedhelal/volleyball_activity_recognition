@@ -144,6 +144,7 @@ class VolleyballDataset(Dataset):
             tokens    = line.split()
             frame_str = tokens[0]
             group_str = tokens[1]
+            group_str = tokens[1].replace("-", "_")
             frame_id  = int(frame_str.replace(".jpg", ""))
             group_label = self.cfg.labels.group_activities.index(group_str)
 
